@@ -1,0 +1,29 @@
+.conda-pkgs/
+.cache/
+.tools/
+.venv/
+.art2mus-env/
+.art2mus-reference-env/
+.interaction-env/
+**/__pycache__/
+*.pyc
+.DS_Store
+*.log
+webapp/runtime/
+
+# Third-party source and model files are installed locally by the launcher.
+third_party/*
+!third_party/README.md
+
+# Generated research files are kept locally. Only the assets required by the
+# built-in browser demo and the compact pipeline diagram are published.
+tmp/
+output/
+outputs/*
+!outputs/interactive-prep/
+outputs/interactive-prep/*
+!outputs/interactive-prep/the-defiant-one-regions/
+!outputs/interactive-prep/the-defiant-one-regions/**
+!outputs/render-street-art-pipeline.py
+!outputs/street-art-pipeline.png
+!outputs/street-art-pipeline.svg

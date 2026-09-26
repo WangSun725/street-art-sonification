@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f4f1">
+  <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
+  <title>Street Art Sonification</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="workspace">
+    <section class="art-panel" aria-label="Artwork exploration">
+      <div class="art-toolbar">
+        <div>
+          <span class="eyebrow">EXPLORE</span>
+          <p>Move across the image</p>
+        </div>
+        <div class="toolbar-actions">
+          <button id="maskToggle" class="icon-button active" type="button" aria-pressed="true" title="Show region contours">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg>
+            <span>Contours</span>
+          </button>
+          <button id="soundToggle" class="icon-button" type="button" aria-pressed="false" title="Turn sound on or off">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 4V5L9 9H5Z"/><path class="sound-wave" d="M17 9.2a4 4 0 0 1 0 5.6M19.5 6.5a8 8 0 0 1 0 11"/></svg>
+            <span>Sound</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="canvasShell" class="canvas-shell" tabindex="0" aria-label="Interactive street art canvas">
+        <canvas id="artCanvas"></canvas>
+        <div id="dropHint" class="drop-hint" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5"/></svg>
+          <strong>Drop image</strong>
+        </div>
+        <div id="analysisOverlay" class="analysis-overlay" hidden>
+          <div class="scanner" aria-hidden="true"></div>
+          <div class="analysis-card">
+            <span id="analysisPercent">0%</span>
+            <strong id="analysisMessage">Analysing artwork…</strong>
+            <div class="progress"><i id="progressBar"></i></div>
+            <small>Qwen3-VL understands the image · SAM 2.1 defines the regions</small>
+          </div>
+        </div>
+        <div id="regionBadge" class="region-badge" hidden>
+          <i></i>
+          <div><span id="regionType">DETAIL</span><strong id="regionName">Sunglasses</strong></div>
+        </div>
+      </div>
+
+      <div class="interaction-strip">
+        <div class="signal">
+          <span class="signal-label">ACTIVE REGION</span>
+          <strong id="currentRegion">Move over the artwork</strong>
+        </div>
+        <div class="metric"><span>X</span><b id="xValue">0.000</b></div>
+        <div class="metric"><span>Y</span><b id="yValue">0.000</b></div>
+        <div class="metric"><span>SPEED</span><b id="speedValue">0.00</b></div>
+        <div class="metric"><span>EDGE</span><b id="edgeValue">0.00</b></div>
+      </div>
+    </section>
+
+    <aside class="control-panel">
+      <header class="panel-header">
+        <h1>Street Art<br>Sonification</h1>
+        <span class="local-state"><i></i> Local models</span>
+      </header>
+
+      <section class="volume-section" aria-label="Sound output level">
+        <div class="volume-label">
+          <label for="volumeSlider">Output volume</label>
+          <output id="volumeValue" for="volumeSlider">70%</output>
+        </div>
+        <input id="volumeSlider" type="range" min="0" max="100" value="70" step="1" aria-label="Output volume">
+        <div class="volume-scale" aria-hidden="true"><span>Quiet</span><span>Loud</span></div>
+      </section>
+
+      <section class="control-section input-section">
+        <div class="section-heading">
+          <span>INPUT</span>
+          <h2>Artwork</h2>
+        </div>
+        <label id="dropZone" class="drop-zone" for="fileInput">
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V19h16v-2.5M12 4v11m0-11L7.5 8.5M12 4l4.5 4.5"/></svg>
+          <span><strong>Drop an image</strong> or choose a file</span>
+          <small>JPG, PNG or WebP · up to 16 MB</small>
+        </label>
+        <div id="fileInfo" class="file-info">
+          <span class="thumbnail"><img id="thumbImage" alt="Current artwork thumbnail"></span>
+          <span><strong id="fileName">the-defiant-one.webp</strong><small id="fileMeta">Sample artwork · analysed</small></span>
+          <button id="clearFile" type="button" aria-label="Restore sample artwork">×</button>
+        </div>
+        <label class="statement-field">
+          <span>Artist statement <small>optional</small></span>
+          <textarea id="statement" rows="3" placeholder="What is the work about? Why was it made?"></textarea>
+        </label>
+        <button id="analyzeButton" class="primary-button" type="button">
+          <span>Analyse image</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <p id="statusText" class="status-text" role="status">The sample is ready. Move across the image to begin.</p>
+      </section>
+
+      <section class="control-section regions-section">
+        <div class="section-heading inline">
+          <div><span>MAP</span><h2>Regions</h2></div>
+          <span id="regionCount" class="count-pill">9</span>
+        </div>
+        <div id="regionList" class="region-list" aria-label="Detected regions"></div>
+      </section>
+
+      <section class="control-section output-section">
+        <div class="section-heading inline">
+          <div><span>OUTPUT</span><h2>Interaction Signal</h2></div>
+          <span id="socketStatus" class="socket-pill"><i></i> Connected</span>
+        </div>
+        <pre id="outputJson" aria-label="Current interaction signal">{
+  "region": null,
+  "x": 0,
+  "y": 0
+}</pre>
+        <div class="endpoint-row">
+          <div><span>WebSocket endpoint</span><code id="endpointUrl">ws://127.0.0.1:8765/ws/events</code></div>
+          <button id="copyEndpoint" type="button" title="Copy endpoint" aria-label="Copy WebSocket endpoint">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+          </button>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

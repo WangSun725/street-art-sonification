@@ -1,0 +1,335 @@
+{
+  "image": "inputs/the-defiant-one.webp",
+  "image_size": {
+    "width": 850,
+    "height": 1030
+  },
+  "proposal_source": "Qwen3-VL 2B Instruct, reviewed points/boxes",
+  "mask_model": "SAM 2.1 Hiera Tiny",
+  "device": "mps",
+  "regions": [
+    {
+      "id": "colored_wall",
+      "label": "Colored wall",
+      "type": "wall",
+      "method": "sam2-figure-exclusion + opencv-color-segmentation",
+      "index": 1,
+      "color_rgb": [
+        245,
+        192,
+        54
+      ],
+      "visual_mask": "01_colored_wall_mask.png",
+      "hit_mask": "01_colored_wall_hit.png",
+      "sam_scores": [
+        0.6931
+      ],
+      "area_ratio": 0.16556,
+      "prompts": [
+        {
+          "bbox_px": [
+            0,
+            0,
+            849,
+            1029
+          ],
+          "point_px": [
+            35,
+            75
+          ]
+        }
+      ],
+      "notes": "High-saturation painted wall outside the central figure and dark lettering."
+    },
+    {
+      "id": "background_lettering",
+      "label": "Background lettering",
+      "type": "lettering",
+      "method": "sam2-proposal + opencv-dark-mark-refinement",
+      "index": 2,
+      "color_rgb": [
+        232,
+        82,
+        120
+      ],
+      "visual_mask": "02_background_lettering_mask.png",
+      "hit_mask": "02_background_lettering_hit.png",
+      "sam_scores": [
+        0.875,
+        0.7605,
+        0.7815
+      ],
+      "area_ratio": 0.0532,
+      "prompts": [
+        {
+          "bbox_px": [
+            0,
+            0,
+            155,
+            455
+          ],
+          "point_px": [
+            75,
+            110
+          ]
+        },
+        {
+          "bbox_px": [
+            225,
+            0,
+            585,
+            245
+          ],
+          "point_px": [
+            445,
+            55
+          ]
+        },
+        {
+          "bbox_px": [
+            610,
+            0,
+            849,
+            260
+          ],
+          "point_px": [
+            705,
+            85
+          ]
+        }
+      ],
+      "notes": "Dark coarse background marks inside the reviewed upper-wall boxes; the central figure is explicitly excluded."
+    },
+    {
+      "id": "left_drips_decay",
+      "label": "Drips / wall decay",
+      "type": "drip",
+      "method": "sam2",
+      "index": 3,
+      "color_rgb": [
+        57,
+        195,
+        178
+      ],
+      "visual_mask": "03_left_drips_decay_mask.png",
+      "hit_mask": "03_left_drips_decay_hit.png",
+      "sam_scores": [
+        0.8259
+      ],
+      "area_ratio": 0.07251,
+      "prompts": [
+        {
+          "bbox_px": [
+            0,
+            335,
+            160,
+            930
+          ],
+          "point_px": [
+            35,
+            565
+          ]
+        }
+      ],
+      "notes": "Left-side paint-run and weathered wall field."
+    },
+    {
+      "id": "central_figure",
+      "label": "Central figure",
+      "type": "figure",
+      "method": "sam2",
+      "index": 4,
+      "color_rgb": [
+        84,
+        134,
+        247
+      ],
+      "visual_mask": "04_central_figure_mask.png",
+      "hit_mask": "04_central_figure_hit.png",
+      "sam_scores": [
+        0.9825
+      ],
+      "area_ratio": 0.66731,
+      "prompts": [
+        {
+          "bbox_px": [
+            35,
+            60,
+            839,
+            1029
+          ],
+          "point_px": [
+            430,
+            525
+          ]
+        }
+      ],
+      "notes": "Parent region for the central stencil-like character."
+    },
+    {
+      "id": "raised_arm",
+      "label": "Raised arm / object",
+      "type": "figure",
+      "method": "sam2",
+      "index": 5,
+      "color_rgb": [
+        164,
+        102,
+        245
+      ],
+      "visual_mask": "05_raised_arm_mask.png",
+      "hit_mask": "05_raised_arm_hit.png",
+      "sam_scores": [
+        0.9232
+      ],
+      "area_ratio": 0.11213,
+      "prompts": [
+        {
+          "bbox_px": [
+            45,
+            220,
+            325,
+            990
+          ],
+          "point_px": [
+            185,
+            505
+          ]
+        }
+      ],
+      "notes": "Gesture-bearing left-side arm and held object."
+    },
+    {
+      "id": "black_clothing",
+      "label": "Black foreground clothing",
+      "type": "fill",
+      "method": "sam2",
+      "index": 6,
+      "color_rgb": [
+        32,
+        170,
+        228
+      ],
+      "visual_mask": "06_black_clothing_mask.png",
+      "hit_mask": "06_black_clothing_hit.png",
+      "sam_scores": [
+        0.7519
+      ],
+      "area_ratio": 0.30565,
+      "prompts": [
+        {
+          "bbox_px": [
+            70,
+            535,
+            840,
+            1029
+          ],
+          "point_px": [
+            405,
+            845
+          ]
+        }
+      ],
+      "notes": "Large lower black mass used as a low-frequency musical layer."
+    },
+    {
+      "id": "face",
+      "label": "Face / skin fill",
+      "type": "fill",
+      "method": "sam2",
+      "index": 7,
+      "color_rgb": [
+        247,
+        142,
+        43
+      ],
+      "visual_mask": "07_face_mask.png",
+      "hit_mask": "07_face_hit.png",
+      "sam_scores": [
+        0.7015
+      ],
+      "area_ratio": 0.19133,
+      "prompts": [
+        {
+          "bbox_px": [
+            270,
+            75,
+            715,
+            590
+          ],
+          "point_px": [
+            470,
+            405
+          ]
+        }
+      ],
+      "notes": "Internal light face region nested inside the figure."
+    },
+    {
+      "id": "sunglasses",
+      "label": "Sunglasses",
+      "type": "outline",
+      "method": "sam2",
+      "index": 8,
+      "color_rgb": [
+        233,
+        70,
+        67
+      ],
+      "visual_mask": "08_sunglasses_mask.png",
+      "hit_mask": "08_sunglasses_hit.png",
+      "sam_scores": [
+        0.8631
+      ],
+      "area_ratio": 0.03089,
+      "prompts": [
+        {
+          "bbox_px": [
+            285,
+            200,
+            625,
+            365
+          ],
+          "point_px": [
+            480,
+            285
+          ]
+        }
+      ],
+      "notes": "High-contrast facial detail; hit mask is enlarged for interaction."
+    },
+    {
+      "id": "cigarette_smoke",
+      "label": "Cigarette / smoke",
+      "type": "outline",
+      "method": "sam2",
+      "index": 9,
+      "color_rgb": [
+        126,
+        211,
+        33
+      ],
+      "visual_mask": "09_cigarette_smoke_mask.png",
+      "hit_mask": "09_cigarette_smoke_hit.png",
+      "sam_scores": [
+        0.6583
+      ],
+      "area_ratio": 0.01513,
+      "prompts": [
+        {
+          "bbox_px": [
+            275,
+            275,
+            455,
+            425
+          ],
+          "point_px": [
+            373,
+            365
+          ]
+        }
+      ],
+      "notes": "Thin detail; the playable hit area is deliberately wider than the visual line."
+    }
+  ]
+}

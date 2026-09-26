@@ -1,0 +1,11 @@
+# Core segmentation environment for macOS Apple Silicon / Python 3.11
+numpy==1.26.4
+torch==2.14.0
+torchvision==0.29.0
+scipy==1.17.1
+scikit-image==0.26.0
+scikit-learn==1.9.1
+matplotlib==3.11.2
+opencv-python-headless==4.10.0.84
+pillow==12.3.0
+imageio==2.37.4
