@@ -70,4 +70,8 @@ Another local page or program can connect to this address to receive `pointer_st
 GET http://127.0.0.1:8765/api/state
 ```
 
-These interfaces currently expose structured control data only. MIDI, OSC, and Ableton conversion are intentionally outside this version.
+## External output
+
+The right-side **External Output** editor routes the same structured control data to MIDI or OSC. OSC targets use a host, UDP port, and editable address. MIDI targets use a CoreMIDI output port, CC or note number, channel, range, and optional inversion. The project can create a virtual **Street Art Sonification** MIDI output, or send to an existing IAC or physical port.
+
+Mappings and connection settings are saved locally under `webapp/runtime/external-output.json`. The FastAPI server applies them whenever it receives a `pointer_state` or `scan_state`, so a receiving DAW, Max patch, SuperCollider process, or hardware bridge can listen directly without running another conversion script.

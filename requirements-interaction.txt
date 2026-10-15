@@ -3,6 +3,9 @@ mlx-vlm==0.7.2
 fastapi==0.141.1
 uvicorn==0.53.0
 pillow==12.3.0
+mido==1.3.3
+python-rtmidi==1.5.8
+python-osc==1.9.3
 
 # SAM 2 is installed separately from the checked-out official source:
 # SAM2_BUILD_CUDA=0 .venv/bin/pip install --no-build-isolation -e third_party/sam2

@@ -20,11 +20,14 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, W
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from output_bridge import ExternalOutputManager
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = WEB_DIR / "runtime"
 JOBS_DIR = RUNTIME_DIR / "jobs"
+OUTPUT_CONFIG = RUNTIME_DIR / "external-output.json"
 DEMO_IMAGE = ROOT / "inputs" / "the-defiant-one.webp"
 DEMO_DIR = ROOT / "outputs" / "interactive-prep" / "the-defiant-one-regions"
 QWEN_PYTHON = ROOT / ".interaction-env" / "bin" / "python"
@@ -53,6 +56,7 @@ latest_state: dict[str, Any] = {
 }
 event_clients: set[WebSocket] = set()
 analysis_lock = asyncio.Lock()
+external_output = ExternalOutputManager(OUTPUT_CONFIG)
 
 
 def demo_payload() -> dict[str, Any]:
@@ -313,6 +317,30 @@ async def api_state() -> JSONResponse:
     return JSONResponse(latest_state)
 
 
+@app.get("/api/external-output")
+async def api_external_output() -> JSONResponse:
+    """Return the saved routing configuration, available ports, and activity."""
+    return JSONResponse(await asyncio.to_thread(external_output.public_state))
+
+
+@app.put("/api/external-output")
+async def api_update_external_output(configuration: dict[str, Any]) -> JSONResponse:
+    try:
+        saved = await asyncio.to_thread(external_output.save, configuration)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"config": saved, "activity": external_output.last_activity})
+
+
+@app.post("/api/external-output/test/{protocol}")
+async def api_test_external_output(protocol: str) -> JSONResponse:
+    try:
+        activity = await asyncio.to_thread(external_output.test, protocol.lower())
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return JSONResponse({"activity": activity})
+
+
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -321,9 +349,10 @@ async def ws_events(websocket: WebSocket) -> None:
     try:
         while True:
             message = await websocket.receive_json()
-            if message.get("type") == "pointer_state":
+            if message.get("type") in {"pointer_state", "scan_state"}:
                 latest_state.clear()
                 latest_state.update(message)
+                await asyncio.to_thread(external_output.process, message)
                 stale: list[WebSocket] = []
                 for client in event_clients:
                     if client is websocket:
@@ -340,6 +369,7 @@ async def ws_events(websocket: WebSocket) -> None:
 
 @app.on_event("shutdown")
 async def clean_old_jobs() -> None:
+    external_output.close()
     # Uploads are demo-session data; keep recent results so the page can reload.
     cutoff = time.time() - 24 * 60 * 60
     for directory in JOBS_DIR.iterdir():

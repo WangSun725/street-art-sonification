@@ -7,15 +7,15 @@
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20261015-external1">
 </head>
 <body>
   <main class="workspace">
     <section class="art-panel" aria-label="Artwork exploration">
       <div class="art-toolbar">
         <div>
-          <span class="eyebrow">EXPLORE</span>
-          <p>Move across the image</p>
+          <span id="modeEyebrow" class="eyebrow">POINTER / GAZE</span>
+          <p id="modeInstruction">Move across the image with a mouse or your eyes</p>
         </div>
         <div class="toolbar-actions">
           <button id="maskToggle" class="icon-button active" type="button" aria-pressed="true" title="Show region contours">
@@ -29,8 +29,26 @@
         </div>
       </div>
 
+      <nav class="mode-switch" aria-label="Interaction mode">
+        <button id="pointerMode" class="mode-button active" type="button" aria-pressed="true">
+          <small>01</small>
+          <span><strong>Pointer / Gaze</strong><em>Explore individual regions</em></span>
+          <i aria-hidden="true"></i>
+        </button>
+        <button id="scanMode" class="mode-button" type="button" aria-pressed="false">
+          <small>02</small>
+          <span><strong>Left-to-Right Scan</strong><em>Hear the complete image over time</em></span>
+          <i aria-hidden="true"></i>
+        </button>
+      </nav>
+
       <div id="canvasShell" class="canvas-shell" tabindex="0" aria-label="Interactive street art canvas">
         <canvas id="artCanvas"></canvas>
+        <div id="gazeCursor" class="gaze-cursor" hidden aria-hidden="true"><i></i></div>
+        <div id="scanReadout" class="scan-readout" hidden>
+          <span>TIME</span>
+          <strong id="canvasScanTime">00:00</strong>
+        </div>
         <div id="dropHint" class="drop-hint" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5"/></svg>
           <strong>Drop image</strong>
@@ -50,9 +68,47 @@
         </div>
       </div>
 
+      <div id="pointerControls" class="pointer-bar" aria-label="Pointer and eye-tracking controls">
+        <div class="source-selector" role="group" aria-label="Pointer source">
+          <button id="mouseSource" class="active" type="button" aria-pressed="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3.5 18.5 14l-5 .8 2.8 4.7-2.5 1.5-2.7-4.7-3.1 4V3.5Z"/></svg>
+            Mouse
+          </button>
+          <button id="eyeToggle" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            Eye tracking
+          </button>
+        </div>
+        <div class="eye-state">
+          <video id="eyeVideo" autoplay playsinline muted hidden aria-label="Eye-tracking camera preview"></video>
+          <div><span>INPUT SOURCE</span><strong id="eyeStatus">Mouse active · camera off</strong></div>
+        </div>
+        <button id="eyeCalibrate" class="calibrate-button" type="button" disabled>Calibrate</button>
+      </div>
+
+      <div id="scanControls" class="journey-bar" aria-label="Left-to-right artwork scan" hidden>
+        <button id="scanPlay" class="journey-play" type="button" aria-pressed="false">
+          <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 9 6-9 6V6Z"/></svg>
+          <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg>
+          <span>Start</span>
+        </button>
+        <div class="journey-timeline">
+          <div class="journey-meta">
+            <span>TIME</span>
+            <output id="scanTime" for="scanTimeline">00:00 / 10:00</output>
+          </div>
+          <input id="scanTimeline" type="range" min="0" max="600" value="0" step="0.05" aria-label="Timeline position">
+        </div>
+        <label class="duration-field" for="scanDuration">
+          <span>DURATION</span>
+          <input id="scanDuration" type="text" value="10:00" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
+        </label>
+        <button id="scanReset" class="journey-reset" type="button" title="Return the scan to the left edge">Reset</button>
+      </div>
+
       <div class="interaction-strip">
         <div class="signal">
-          <span class="signal-label">ACTIVE REGION</span>
+          <span id="signalLabel" class="signal-label">ACTIVE REGION · MOUSE</span>
           <strong id="currentRegion">Move over the artwork</strong>
         </div>
         <div class="metric"><span>X</span><b id="xValue">0.000</b></div>
@@ -65,7 +121,10 @@
     <aside class="control-panel">
       <header class="panel-header">
         <h1>Street Art<br>Sonification</h1>
-        <span class="local-state"><i></i> Local models</span>
+        <div class="panel-meta">
+          <span class="local-state"><i></i> Local models</span>
+          <button id="logicOpen" class="logic-open" type="button">Interaction logic</button>
+        </div>
       </header>
 
       <section class="volume-section" aria-label="Sound output level">
@@ -112,6 +171,49 @@
         <div id="regionList" class="region-list" aria-label="Detected regions"></div>
       </section>
 
+      <section class="control-section external-section" aria-label="External MIDI and OSC output">
+        <div class="section-heading inline">
+          <div><span>ROUTING</span><h2>External Output</h2></div>
+          <span id="externalStatus" class="external-pill"><i></i> Off</span>
+        </div>
+        <label class="external-enable">
+          <span><strong>Send mapped control</strong><small>Web Audio remains independent</small></span>
+          <input id="externalEnabled" type="checkbox" role="switch" aria-label="Enable external output">
+          <i aria-hidden="true"></i>
+        </label>
+
+        <details class="route-card" open>
+          <summary><span><b>OSC</b><small>Network control messages</small></span><i aria-hidden="true"></i></summary>
+          <div class="route-fields osc-fields">
+            <label><span>HOST</span><input id="oscHost" type="text" value="127.0.0.1" spellcheck="false"></label>
+            <label><span>PORT</span><input id="oscPort" type="number" min="1" max="65535" value="9000"></label>
+            <button id="oscTest" class="route-test" type="button">Send test</button>
+          </div>
+        </details>
+
+        <details class="route-card">
+          <summary><span><b>MIDI</b><small>Notes and controller values</small></span><i aria-hidden="true"></i></summary>
+          <div class="route-fields midi-fields">
+            <label><span>OUTPUT PORT</span><select id="midiPort"><option value="__virtual__">Street Art Sonification (virtual)</option></select></label>
+            <button id="midiRefresh" class="route-refresh" type="button" title="Refresh MIDI ports" aria-label="Refresh MIDI ports">↻</button>
+            <button id="midiTest" class="route-test" type="button">Send test note</button>
+          </div>
+        </details>
+
+        <details class="mapping-editor" open>
+          <summary>
+            <span><b>Mappings</b><small>Choose which visual data controls each destination</small></span>
+            <span id="mappingCount" class="count-pill">0</span>
+          </summary>
+          <div id="mappingList" class="mapping-list"></div>
+          <button id="addMapping" class="add-mapping" type="button">+ Add mapping</button>
+        </details>
+        <div class="external-actions">
+          <button id="saveExternal" class="save-external" type="button">Apply &amp; save</button>
+          <small id="externalMessage" role="status">Settings are stored on this Mac.</small>
+        </div>
+      </section>
+
       <section class="control-section output-section">
         <div class="section-heading inline">
           <div><span>OUTPUT</span><h2>Interaction Signal</h2></div>
@@ -132,7 +234,54 @@
     </aside>
   </main>
 
+  <div id="logicOverlay" class="logic-overlay" hidden>
+    <section class="logic-dialog" role="dialog" aria-modal="true" aria-labelledby="logicTitle">
+      <header>
+        <div><span>HOW IT WORKS</span><h2 id="logicTitle">Current interaction logic</h2></div>
+        <button id="logicClose" type="button" aria-label="Close interaction logic">×</button>
+      </header>
+      <div class="logic-blocks">
+        <article>
+          <strong>Pointer / Gaze</strong>
+          <p>Use the mouse or local webcam gaze tracking to explore one region at a time. Y controls pitch, X controls stereo, movement adds energy, and boundaries create clicks.</p>
+        </article>
+        <article>
+          <strong>Left-to-Right Scan</strong>
+          <p>The scan crosses the complete artwork over a duration you choose. Up to five regions can sound together.</p>
+        </article>
+        <article class="logic-mapping">
+          <strong>Sound mapping</strong>
+          <dl>
+            <div><dt>Region meaning</dt><dd>Voice and musical role</dd></div>
+            <div><dt>Vertical position</dt><dd>Pitch</dd></div>
+            <div><dt>Horizontal position</dt><dd>Time and musical form</dd></div>
+            <div><dt>Brightness</dt><dd>Harmonic richness</dd></div>
+            <div><dt>Colour</dt><dd>Short sound events</dd></div>
+            <div><dt>Saturation</dt><dd>Event and harmonic strength</dd></div>
+            <div><dt>Region coverage</dt><dd>Volume</dd></div>
+            <div><dt>Texture</dt><dd>Noise and filter detail</dd></div>
+          </dl>
+        </article>
+        <article>
+          <strong>Live output</strong>
+          <p>The current region, position, colour and movement data are published about 20 times per second through the page and WebSocket.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div id="calibrationOverlay" class="calibration-overlay" hidden>
+    <div class="calibration-copy">
+      <span>WEBEYETRACK · LOCAL CALIBRATION</span>
+      <strong>Look at the target, hold still, then click it.</strong>
+      <small id="calibrationProgress">Point 1 of 9</small>
+    </div>
+    <button id="calibrationCancel" class="calibration-cancel" type="button">Cancel</button>
+    <button id="calibrationTarget" class="calibration-target" type="button" aria-label="Eye-tracking calibration target"><i></i><span>HOLD</span></button>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
+  <script src="/static/app.js?v=20261015-external1"></script>
 </body>
 </html>
