@@ -93,6 +93,10 @@ SOURCES = {
     "color.brightness",
     "scan.progress",
     "scan.primaryIntensity",
+    "music.bpm",
+    "music.rootMidi",
+    "music.modeIndex",
+    "music.beatPhase",
     "region.enter",
 }
 

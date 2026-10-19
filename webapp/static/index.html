@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f4f4f1">
+  <meta name="theme-color" content="#eee6d7">
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261015-external1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261019-handpainted3">
 </head>
 <body>
   <main class="workspace">
@@ -66,6 +66,10 @@
           <i></i>
           <div><span id="regionType">DETAIL</span><strong id="regionName">Sunglasses</strong></div>
         </div>
+        <button id="fullscreenExit" class="fullscreen-exit" type="button" aria-label="Exit fullscreen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
+          <span>Exit fullscreen</span>
+        </button>
       </div>
 
       <div id="pointerControls" class="pointer-bar" aria-label="Pointer and eye-tracking controls">
@@ -84,6 +88,10 @@
           <div><span>INPUT SOURCE</span><strong id="eyeStatus">Mouse active · camera off</strong></div>
         </div>
         <button id="eyeCalibrate" class="calibrate-button" type="button" disabled>Calibrate</button>
+        <button id="pointerFullscreen" class="fullscreen-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
+          <span>Fullscreen</span>
+        </button>
       </div>
 
       <div id="scanControls" class="journey-bar" aria-label="Left-to-right artwork scan" hidden>
@@ -104,6 +112,10 @@
           <input id="scanDuration" type="text" value="10:00" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
         </label>
         <button id="scanReset" class="journey-reset" type="button" title="Return the scan to the left edge">Reset</button>
+        <button id="scanFullscreen" class="fullscreen-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
+          <span>Fullscreen</span>
+        </button>
       </div>
 
       <div class="interaction-strip">
@@ -134,6 +146,28 @@
         </div>
         <input id="volumeSlider" type="range" min="0" max="100" value="70" step="1" aria-label="Output volume">
         <div class="volume-scale" aria-hidden="true"><span>Quiet</span><span>Loud</span></div>
+      </section>
+
+      <section class="music-section" aria-label="Global musical settings">
+        <div class="music-heading">
+          <div><span>MUSIC</span><strong>Global system</strong></div>
+          <small>Shared by pointer, gaze, scan and live output</small>
+        </div>
+        <div class="music-controls">
+          <label for="musicBpm"><span>BPM</span><input id="musicBpm" type="number" min="40" max="200" step="1" value="72"></label>
+          <label for="musicRoot"><span>ROOT</span><select id="musicRoot" aria-label="Musical root note">
+            <option>C</option><option>C#</option><option selected>D</option><option>D#</option><option>E</option><option>F</option>
+            <option>F#</option><option>G</option><option>G#</option><option>A</option><option>A#</option><option>B</option>
+          </select></label>
+          <label for="musicMode"><span>MODE</span><select id="musicMode" aria-label="Musical mode">
+            <option value="major">Major</option>
+            <option value="minor">Minor</option>
+            <option value="dorian" selected>Dorian</option>
+            <option value="phrygian">Phrygian</option>
+            <option value="mixolydian">Mixolydian</option>
+            <option value="minorPentatonic">Minor pentatonic</option>
+          </select></label>
+        </div>
       </section>
 
       <section class="control-section input-section">
@@ -243,7 +277,7 @@
       <div class="logic-blocks">
         <article>
           <strong>Pointer / Gaze</strong>
-          <p>Use the mouse or local webcam gaze tracking to explore one region at a time. Y controls pitch, X controls stereo, movement adds energy, and boundaries create clicks.</p>
+          <p>Use the mouse or local webcam gaze tracking to explore one region at a time. Y selects notes inside the global mode, X controls stereo, movement adds energy, and boundaries create clicks.</p>
         </article>
         <article>
           <strong>Left-to-Right Scan</strong>
@@ -252,6 +286,7 @@
         <article class="logic-mapping">
           <strong>Sound mapping</strong>
           <dl>
+            <div><dt>BPM and mode</dt><dd>Shared timing and pitch system</dd></div>
             <div><dt>Region meaning</dt><dd>Voice and musical role</dd></div>
             <div><dt>Vertical position</dt><dd>Pitch</dd></div>
             <div><dt>Horizontal position</dt><dd>Time and musical form</dd></div>
@@ -282,6 +317,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=20261015-external1"></script>
+  <script src="/static/app.js?v=20261019-handpainted3"></script>
 </body>
 </html>

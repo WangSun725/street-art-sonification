@@ -18,6 +18,9 @@ const maskToggle = $("#maskToggle");
 const soundToggle = $("#soundToggle");
 const volumeSlider = $("#volumeSlider");
 const volumeValue = $("#volumeValue");
+const musicBpm = $("#musicBpm");
+const musicRoot = $("#musicRoot");
+const musicMode = $("#musicMode");
 const scanPlay = $("#scanPlay");
 const scanReset = $("#scanReset");
 const scanTimeline = $("#scanTimeline");
@@ -28,6 +31,9 @@ const pointerMode = $("#pointerMode");
 const scanMode = $("#scanMode");
 const pointerControls = $("#pointerControls");
 const scanControls = $("#scanControls");
+const pointerFullscreen = $("#pointerFullscreen");
+const scanFullscreen = $("#scanFullscreen");
+const fullscreenExit = $("#fullscreenExit");
 const mouseSource = $("#mouseSource");
 const eyeToggle = $("#eyeToggle");
 const eyeCalibrate = $("#eyeCalibrate");
@@ -49,6 +55,15 @@ const midiPort = $("#midiPort");
 
 const DEFAULT_SCAN_DURATION = 10 * 60;
 const SCAN_PROFILE_BINS = 360;
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const MUSIC_MODES = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  minor: [0, 2, 3, 5, 7, 8, 10],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  minorPentatonic: [0, 3, 5, 7, 10],
+};
 
 const state = {
   manifest: null,
@@ -59,6 +74,7 @@ const state = {
   mode: "pointer",
   masksVisible: true,
   analyzing: false,
+  music: { bpm: 72, root: "D", mode: "dorian" },
   pointer: { x: 0, y: 0, nx: 0, ny: 0, speed: 0, lastTime: 0, source: "mouse" },
   eye: {
     active: false,
@@ -126,6 +142,15 @@ function showToast(message) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 1800);
 }
 
+function musicRootMidi() {
+  return 36 + Math.max(0, NOTE_NAMES.indexOf(state.music.root));
+}
+
+function musicBeatPosition(scanning = state.mode === "scan") {
+  const seconds = scanning ? state.scan.seconds : performance.now() / 1000;
+  return seconds * state.music.bpm / 60;
+}
+
 const externalSources = [
   ["normalized.x", "Horizontal position"],
   ["normalized.y", "Vertical position"],
@@ -137,8 +162,17 @@ const externalSources = [
   ["color.brightness", "Brightness"],
   ["scan.progress", "Scan progress"],
   ["scan.primaryIntensity", "Primary region intensity"],
+  ["music.bpm", "Music BPM"],
+  ["music.rootMidi", "Music root note"],
+  ["music.modeIndex", "Music mode"],
+  ["music.beatPhase", "Music beat phase"],
   ["region.enter", "Enter region (trigger)"],
 ];
+const externalSourceRanges = {
+  "music.bpm": [40, 200],
+  "music.rootMidi": [36, 47],
+  "music.modeIndex": [0, Object.keys(MUSIC_MODES).length - 1],
+};
 
 let externalConfig = null;
 let externalDependencies = null;
@@ -180,6 +214,7 @@ function updateMappingRow(row) {
     row.querySelector(".mapping-max").value = protocol === "osc" ? "1" : "127";
   }
   row.dataset.protocol = protocol;
+  row.dataset.source = source;
   target.previousElementSibling.textContent = protocol === "osc" ? "OSC ADDRESS" : (source === "region.enter" ? "NOTE" : "CC");
   target.type = protocol === "osc" ? "text" : "number";
   target.min = protocol === "osc" ? "" : "0";
@@ -276,6 +311,8 @@ function collectExternalConfig() {
       const source = row.querySelector(".mapping-source").value;
       const protocol = row.querySelector(".mapping-protocol").value;
       const earlier = previous.mappings?.find((item) => item.id === row.dataset.id);
+      const sourceRange = externalSourceRanges[source] || [0, 1];
+      const keepEarlierRange = earlier?.source === source;
       return {
         id: row.dataset.id,
         enabled: row.querySelector(".mapping-enabled").checked,
@@ -284,8 +321,8 @@ function collectExternalConfig() {
         target: row.querySelector(".mapping-target-input").value,
         message: source === "region.enter" ? (protocol === "midi" ? "note" : "trigger") : (protocol === "midi" ? "cc" : "value"),
         channel: Number(row.querySelector(".mapping-channel").value || 1),
-        inputMin: earlier?.inputMin ?? 0,
-        inputMax: earlier?.inputMax ?? 1,
+        inputMin: keepEarlierRange ? earlier.inputMin : sourceRange[0],
+        inputMax: keepEarlierRange ? earlier.inputMax : sourceRange[1],
         outputMin: Number(row.querySelector(".mapping-min").value),
         outputMax: Number(row.querySelector(".mapping-max").value),
         invert: row.querySelector(".mapping-invert").checked,
@@ -791,6 +828,15 @@ function outputPayload() {
       calibrated: state.eye.calibrated,
       model: state.eye.active ? "WebEyeTrack" : null,
     } : null,
+    music: {
+      bpm: state.music.bpm,
+      root: state.music.root,
+      rootMidi: musicRootMidi(),
+      mode: state.music.mode,
+      modeIndex: Math.max(0, Object.keys(MUSIC_MODES).indexOf(state.music.mode)),
+      beatPosition: Number(musicBeatPosition(scanning).toFixed(3)),
+      beatPhase: Number((musicBeatPosition(scanning) % 1).toFixed(3)),
+    },
     timestamp: Date.now(),
   };
 }
@@ -834,6 +880,7 @@ class SoundEngine {
     this.lastTick = 0;
     this.lastRegion = null;
     this.lastSeekAccent = 0;
+    this.clockOrigin = 0;
   }
   setOutputLevel(value) {
     this.outputLevel = Math.max(0, Math.min(1, value));
@@ -860,6 +907,7 @@ class SoundEngine {
   setup() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     this.context = new AudioContextClass();
+    this.clockOrigin = this.context.currentTime;
     this.musicBus = this.context.createGain();
     this.musicBus.gain.value = 1;
     this.filter = this.context.createBiquadFilter();
@@ -908,18 +956,53 @@ class SoundEngine {
     for (let i = 0; i < noise.length; i++) noise[i] = Math.random() * 2 - 1;
     this.oscillator.start();
   }
+  beatSeconds() {
+    return 60 / state.music.bpm;
+  }
+  resetMusicalClock() {
+    if (this.context) this.clockOrigin = this.context.currentTime;
+    this.resetScanEvents();
+  }
+  quantizedDelay(divisionsPerBeat = 4) {
+    if (!this.context) return 0;
+    const step = this.beatSeconds() / divisionsPerBeat;
+    const elapsed = Math.max(0, this.context.currentTime - this.clockOrigin);
+    const next = Math.ceil((elapsed + .002) / step) * step;
+    return Math.max(0, next - elapsed);
+  }
+  snapFrequency(frequency) {
+    const scale = MUSIC_MODES[state.music.mode] || MUSIC_MODES.dorian;
+    const root = NOTE_NAMES.indexOf(state.music.root);
+    const midi = 69 + 12 * Math.log2(Math.max(1, frequency) / 440);
+    let nearest = Math.round(midi);
+    let distance = Infinity;
+    for (let candidate = Math.floor(midi) - 7; candidate <= Math.ceil(midi) + 7; candidate++) {
+      const relative = ((candidate - root) % 12 + 12) % 12;
+      if (!scale.includes(relative)) continue;
+      const candidateDistance = Math.abs(candidate - midi);
+      if (candidateDistance < distance) {
+        nearest = candidate;
+        distance = candidateDistance;
+      }
+    }
+    return 440 * Math.pow(2, (nearest - 69) / 12);
+  }
   frequency(region, nx, ny) {
-    const scale = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24];
-    const formShift = [0, 5, 3, 7, 0][Math.min(4, Math.floor(nx * 5))];
-    const semitone = scale[(region.index - 1) % scale.length] + Math.round((1 - ny) * 8) + formShift;
-    return 55 * Math.pow(2, semitone / 12);
+    const scale = MUSIC_MODES[state.music.mode] || MUSIC_MODES.dorian;
+    const horizontalDegreeShift = [0, 2, 1, 3, 0][Math.min(4, Math.floor(nx * 5))];
+    const verticalDegreeShift = Math.round((1 - ny) * 7);
+    const degree = Math.max(0, region.index - 1 + horizontalDegreeShift + verticalDegreeShift);
+    const octave = Math.floor(degree / scale.length);
+    const semitone = scale[degree % scale.length] + octave * 12;
+    const midi = musicRootMidi() + semitone;
+    return 440 * Math.pow(2, (midi - 69) / 12);
   }
   enter(region, nx, ny) {
     if (!this.enabled || !region) return;
     const frequency = this.frequency(region, nx, ny);
     this.oscillator.frequency.setTargetAtTime(frequency, this.context.currentTime, .055);
     this.gain.gain.setTargetAtTime(.055, this.context.currentTime, .035);
-    this.pulse(frequency * 2, .055, .035, region.index % 2 ? "triangle" : "sine");
+    this.pulse(frequency * 2, this.beatSeconds() * .12, .035, region.index % 2 ? "triangle" : "sine", this.quantizedDelay(4));
     this.lastRegion = region.id;
   }
   leave() {
@@ -1003,7 +1086,7 @@ class SoundEngine {
       const voice = this.ensureRegionVoice(region);
       const base = this.frequency(region, nx, centroidY) * voice.settings.octave;
       voice.oscillatorA.frequency.setTargetAtTime(base, now, .11);
-      voice.oscillatorB.frequency.setTargetAtTime(base * (region.index % 3 === 0 ? 1.5 : 2), now, .13);
+      voice.oscillatorB.frequency.setTargetAtTime(this.snapFrequency(base * (region.index % 3 === 0 ? 1.5 : 2)), now, .13);
       const harmonicThresholds = [.16, .34, .52, .7];
       const harmonicLevels = [.24, .16, .105, .07];
       voice.harmonicOscillators.forEach((oscillator, index) => {
@@ -1041,7 +1124,7 @@ class SoundEngine {
       this.colorEvent(item, base, seconds, descriptor);
       this.colorStates.set(item.region.id, {
         signature,
-        nextAt: now + .28 + (1 - item.saturation) * .18,
+        nextAt: now + this.beatSeconds() * (item.saturation > .6 ? .5 : 1),
       });
     }
   }
@@ -1052,60 +1135,62 @@ class SoundEngine {
     const root = Math.max(38, Math.min(1800, base * register));
     const level = (.009 + intensity * .015) * (.78 + saturation * .38);
     const cutoff = 650 + brightness * 4800 + saturation * 900;
-    const stagger = (region.index % 5) * .014;
-    const note = (ratio, duration, volume, type = "sine", delay = 0, filter = cutoff) => {
-      this.pulse(root * ratio, duration, level * volume, type, stagger + delay, pan, filter);
+    const beat = this.beatSeconds();
+    const gridDelay = this.quantizedDelay(4);
+    const stagger = (region.index % 4) * beat / 32;
+    const note = (ratio, durationBeats, volume, type = "sine", delayBeats = 0, filter = cutoff) => {
+      this.pulse(this.snapFrequency(root * ratio), beat * durationBeats, level * volume, type, gridDelay + stagger + beat * delayBeats, pan, filter);
     };
     switch (descriptor.family) {
       case "red":
-        note(.5, .26, 1.25, saturation > .55 ? "sawtooth" : "triangle", 0, cutoff * .55);
-        note(1, .09, .7, "triangle", .075);
+        note(.5, .42, 1.25, saturation > .55 ? "sawtooth" : "triangle", 0, cutoff * .55);
+        note(1, .16, .7, "triangle", .25);
         break;
       case "orange":
-        note(1, .13, 1, "triangle");
-        note(1.25, .11, .75, "triangle", .065);
-        note(1.5, .09, .55, "sine", .13);
+        note(1, .22, 1, "triangle");
+        note(1.25, .18, .75, "triangle", .25);
+        note(1.5, .16, .55, "sine", .5);
         break;
       case "yellow":
-        note(2, .095, .8, "square", 0, cutoff * 1.25);
-        note(3, .18, .62, "sine", .045, cutoff * 1.45);
-        note(4, .12, .42, "sine", .1, cutoff * 1.5);
+        note(2, .14, .8, "square", 0, cutoff * 1.25);
+        note(3, .3, .62, "sine", .25, cutoff * 1.45);
+        note(4, .2, .42, "sine", .5, cutoff * 1.5);
         break;
       case "green":
-        note(1, .19, 1, "triangle");
-        note(1.5, .15, .68, "triangle", .085);
+        note(1, .32, 1, "triangle");
+        note(1.5, .24, .68, "triangle", .5);
         break;
       case "cyan":
-        note(1.5, .24, .72, "sine");
-        note(2, .28, .62, "sine", .055);
-        note(2.5, .21, .42, "sine", .12);
+        note(1.5, .42, .72, "sine");
+        note(2, .5, .62, "sine", .25);
+        note(2.5, .36, .42, "sine", .75);
         break;
       case "blue":
-        note(.5, .36, 1.05, "sine", 0, cutoff * .65);
-        note(1.5, .28, .58, "sine", .11);
+        note(.5, .7, 1.05, "sine", 0, cutoff * .65);
+        note(1.5, .48, .58, "sine", .75);
         break;
       case "violet":
-        note(1, .18, .85, "triangle");
-        note(1.5, .23, .62, "triangle", .04);
-        note(2.25, .17, .45, "sine", .095);
+        note(1, .3, .85, "triangle");
+        note(1.5, .38, .62, "triangle", .25);
+        note(2.25, .28, .45, "sine", .75);
         break;
       case "magenta":
-        note(1, .13, .82, "sawtooth", 0, cutoff * .8);
-        note(2, .1, .5, "triangle", .07);
-        this.noiseBurst(.055 + texture * .055, level * .72, cutoff, stagger + .025, pan, seconds + region.index);
+        note(1, .22, .82, "sawtooth", 0, cutoff * .8);
+        note(2, .16, .5, "triangle", .5);
+        this.noiseBurst(beat * (.08 + texture * .1), level * .72, cutoff, gridDelay + stagger + beat * .25, pan, seconds + region.index);
         break;
       case "white":
-        note(2, .24, .62, "sine");
-        note(3, .31, .46, "sine", .04, cutoff * 1.35);
-        note(5, .2, .28, "sine", .09, cutoff * 1.5);
+        note(2, .42, .62, "sine");
+        note(3, .55, .46, "sine", .25, cutoff * 1.35);
+        note(5, .34, .28, "sine", .75, cutoff * 1.5);
         break;
       case "dark":
-        note(.5, .42, 1.25, "sine", 0, cutoff * .45);
-        note(1, .16, .48, "triangle", .12, cutoff * .65);
+        note(.5, .8, 1.25, "sine", 0, cutoff * .45);
+        note(1, .28, .48, "triangle", .75, cutoff * .65);
         break;
       default:
-        note(1, .18, .7, "triangle", 0, cutoff * .75);
-        this.noiseBurst(.035 + texture * .045, level * .45, cutoff * .7, stagger + .04, pan, seconds + region.index);
+        note(1, .3, .7, "triangle", 0, cutoff * .75);
+        this.noiseBurst(beat * (.055 + texture * .08), level * .45, cutoff * .7, gridDelay + stagger + beat * .25, pan, seconds + region.index);
     }
   }
   noiseBurst(duration, volume, cutoff, delay = 0, pan = 0, offsetSeed = 0) {
@@ -1712,6 +1797,96 @@ volumeSlider.addEventListener("input", () => {
   volumeSlider.style.setProperty("--volume-fill", `${value}%`);
   soundEngine.setOutputLevel(value / 100);
 });
+
+function applyMusicSettings(announce = true) {
+  const bpm = Math.max(40, Math.min(200, Math.round(Number(musicBpm.value) || 72)));
+  const root = NOTE_NAMES.includes(musicRoot.value) ? musicRoot.value : "D";
+  const mode = MUSIC_MODES[musicMode.value] ? musicMode.value : "dorian";
+  state.music = { bpm, root, mode };
+  musicBpm.value = String(bpm);
+  musicRoot.value = root;
+  musicMode.value = mode;
+  try { localStorage.setItem("streetart:music", JSON.stringify(state.music)); } catch (_) { /* Storage is optional. */ }
+  soundEngine.resetMusicalClock();
+  if (state.mode === "scan") soundEngine.updateScan(state.scan.regions, state.scan.position, state.scan.seconds, state.scan.playing);
+  else if (state.lastOutput) soundEngine.update(state.lastOutput);
+  publishOutput(true);
+  if (announce) {
+    const label = musicMode.options[musicMode.selectedIndex]?.textContent || mode;
+    statusText.textContent = `Music set to ${bpm} BPM · ${root} ${label}.`;
+    showToast(`${bpm} BPM · ${root} ${label}`);
+  }
+}
+
+function restoreMusicSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("streetart:music") || "null");
+    if (saved && typeof saved === "object") {
+      musicBpm.value = String(saved.bpm || 72);
+      musicRoot.value = NOTE_NAMES.includes(saved.root) ? saved.root : "D";
+      musicMode.value = MUSIC_MODES[saved.mode] ? saved.mode : "dorian";
+    }
+  } catch (_) { /* Keep the defaults when storage is unavailable. */ }
+  applyMusicSettings(false);
+}
+
+musicBpm.addEventListener("change", () => applyMusicSettings());
+musicBpm.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    applyMusicSettings();
+    musicBpm.blur();
+  }
+});
+musicRoot.addEventListener("change", () => applyMusicSettings());
+musicMode.addEventListener("change", () => applyMusicSettings());
+
+function nativeFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function artworkIsFullscreen() {
+  return nativeFullscreenElement() === canvasShell || canvasShell.classList.contains("fullscreen-fallback");
+}
+
+function syncFullscreenState() {
+  const active = artworkIsFullscreen();
+  pointerFullscreen.setAttribute("aria-pressed", String(active));
+  scanFullscreen.setAttribute("aria-pressed", String(active));
+  fullscreenExit.setAttribute("aria-hidden", String(!active));
+  drawCanvas();
+}
+
+async function toggleArtworkFullscreen() {
+  if (artworkIsFullscreen()) {
+    if (nativeFullscreenElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) await exit.call(document);
+    } else {
+      canvasShell.classList.remove("fullscreen-fallback");
+      document.body.classList.remove("fullscreen-fallback-active");
+      syncFullscreenState();
+    }
+    return;
+  }
+  try {
+    const request = canvasShell.requestFullscreen || canvasShell.webkitRequestFullscreen;
+    if (request) await request.call(canvasShell);
+    else {
+      canvasShell.classList.add("fullscreen-fallback");
+      document.body.classList.add("fullscreen-fallback-active");
+      syncFullscreenState();
+    }
+  } catch (error) {
+    showToast(error.message || "Fullscreen is unavailable in this browser");
+  }
+}
+
+pointerFullscreen.addEventListener("click", toggleArtworkFullscreen);
+scanFullscreen.addEventListener("click", toggleArtworkFullscreen);
+fullscreenExit.addEventListener("click", toggleArtworkFullscreen);
+document.addEventListener("fullscreenchange", syncFullscreenState);
+document.addEventListener("webkitfullscreenchange", syncFullscreenState);
 volumeSlider.style.setProperty("--volume-fill", `${volumeSlider.value}%`);
 scanTimeline.style.setProperty("--scan-fill", "0%");
 updateScanControls();
@@ -1736,6 +1911,7 @@ logicOverlay.addEventListener("click", (event) => {
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !logicOverlay.hidden) setLogicVisible(false);
+  if (event.key === "Escape" && canvasShell.classList.contains("fullscreen-fallback")) toggleArtworkFullscreen();
 });
 
 $("#addMapping").addEventListener("click", () => {
@@ -1755,6 +1931,7 @@ externalEnabled.addEventListener("change", () => {
 });
 
 window.addEventListener("resize", drawCanvas);
+restoreMusicSettings();
 connectSocket();
 loadExternalOutput();
 runAnalysis();
