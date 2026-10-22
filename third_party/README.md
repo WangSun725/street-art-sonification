@@ -10,4 +10,4 @@ The macOS installer downloads the exact dependencies required by the interactive
 
 Model weights, cloned source repositories, and downloaded caches must not be committed to this repository.
 
-SAM 2 and Qwen3-VL are distributed under the Apache 2.0 license. MLX-VLM is distributed under the MIT License. Refer to each upstream project for its complete license terms.
+SAM 2 and Qwen3-VL are distributed under Apache 2.0. MLX-VLM is distributed under the MIT License. Refer to each upstream project for its complete license terms.

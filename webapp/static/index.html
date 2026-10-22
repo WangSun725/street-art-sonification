@@ -7,10 +7,78 @@
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261019-handpainted3">
+  <link rel="stylesheet" href="/static/styles.css?v=20261021-timeline1">
 </head>
-<body>
-  <main class="workspace">
+<body class="setup-active">
+  <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
+    <div class="setup-stage">
+      <div class="setup-form">
+        <label id="dropZone" class="setup-drop-zone" for="fileInput">
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp">
+          <img id="setupPreview" alt="Selected artwork preview" hidden>
+          <span class="setup-drop-copy">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V19h16v-2.5M12 4v11m0-11L7.5 8.5M12 4l4.5 4.5"/></svg>
+            <strong id="fileName">Drop artwork</strong>
+            <small id="fileMeta">Click to choose · JPG, PNG or WebP</small>
+          </span>
+        </label>
+
+        <label class="setup-statement">
+          <span>ARTIST STATEMENT</span>
+          <textarea id="statement" rows="5" required aria-required="true"></textarea>
+        </label>
+
+        <button id="analyzeButton" class="setup-analyse" type="button" disabled>
+          <span>Enter</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <p id="statusText" class="setup-status" role="status" hidden></p>
+
+        <div id="setupProgress" class="setup-progress" hidden aria-live="polite">
+          <div><span id="setupProgressLabel">PREPARING ARTWORK</span><strong id="setupPercent">0%</strong></div>
+          <div class="setup-progress-track"><i id="setupProgressBar"></i></div>
+          <p id="setupProgressMessage">Preparing the artwork…</p>
+          <div class="setup-model-steps" aria-hidden="true">
+            <span data-analysis-step="prepare">Normalize</span>
+            <span data-analysis-step="vision">Read</span>
+            <span data-analysis-step="segment">Regions</span>
+            <span data-analysis-step="music">MIDI</span>
+            <span data-analysis-step="ready">Ready</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="modeScreen" class="mode-screen" aria-label="Choose an interaction mode" hidden>
+    <div class="mode-stage">
+      <div class="mode-heading">
+        <span>INTERACTION</span>
+        <h1>Choose how to explore</h1>
+      </div>
+      <div class="mode-choices">
+        <button id="pointerMode" class="mode-choice" type="button">
+          <span class="mode-number">01</span>
+          <span class="mode-choice-copy">
+            <strong>Mouse / Eye Tracking</strong>
+            <small>Explore individual regions with a pointer or your gaze.</small>
+          </span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <button id="scanMode" class="mode-choice" type="button">
+          <span class="mode-number">02</span>
+          <span class="mode-choice-copy">
+            <strong>Left-to-Right</strong>
+            <small>Hear the complete artwork unfold over a chosen duration.</small>
+          </span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+      <button id="modeStartOver" class="mode-start-over" type="button">Start over</button>
+    </div>
+  </section>
+
+  <main id="performanceScreen" class="workspace" hidden>
     <section class="art-panel" aria-label="Artwork exploration">
       <div class="art-toolbar">
         <div>
@@ -18,6 +86,10 @@
           <p id="modeInstruction">Move across the image with a mouse or your eyes</p>
         </div>
         <div class="toolbar-actions">
+          <button id="newArtwork" class="icon-button start-over-button" type="button" title="Clear this session and return to the first screen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7H4v-4M4.5 7.5A8 8 0 1 1 4 16"/></svg>
+            <span>Start over</span>
+          </button>
           <button id="maskToggle" class="icon-button active" type="button" aria-pressed="true" title="Show region contours">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg>
             <span>Contours</span>
@@ -28,19 +100,6 @@
           </button>
         </div>
       </div>
-
-      <nav class="mode-switch" aria-label="Interaction mode">
-        <button id="pointerMode" class="mode-button active" type="button" aria-pressed="true">
-          <small>01</small>
-          <span><strong>Pointer / Gaze</strong><em>Explore individual regions</em></span>
-          <i aria-hidden="true"></i>
-        </button>
-        <button id="scanMode" class="mode-button" type="button" aria-pressed="false">
-          <small>02</small>
-          <span><strong>Left-to-Right Scan</strong><em>Hear the complete image over time</em></span>
-          <i aria-hidden="true"></i>
-        </button>
-      </nav>
 
       <div id="canvasShell" class="canvas-shell" tabindex="0" aria-label="Interactive street art canvas">
         <canvas id="artCanvas"></canvas>
@@ -59,7 +118,7 @@
             <span id="analysisPercent">0%</span>
             <strong id="analysisMessage">Analysing artwork…</strong>
             <div class="progress"><i id="progressBar"></i></div>
-            <small>Qwen3-VL understands the image · SAM 2.1 defines the regions</small>
+            <small>Qwen3-VL interprets · SAM 2.1 segments · the music system maps</small>
           </div>
         </div>
         <div id="regionBadge" class="region-badge" hidden>
@@ -103,13 +162,13 @@
         <div class="journey-timeline">
           <div class="journey-meta">
             <span>TIME</span>
-            <output id="scanTime" for="scanTimeline">00:00 / 10:00</output>
+            <output id="scanTime" for="scanTimeline">00:00 / 03:00</output>
           </div>
-          <input id="scanTimeline" type="range" min="0" max="600" value="0" step="0.05" aria-label="Timeline position">
+          <input id="scanTimeline" type="range" min="0" max="180" value="0" step="0.05" aria-label="Timeline position">
         </div>
         <label class="duration-field" for="scanDuration">
           <span>DURATION</span>
-          <input id="scanDuration" type="text" value="10:00" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
+          <input id="scanDuration" type="text" value="03:00" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
         </label>
         <button id="scanReset" class="journey-reset" type="button" title="Return the scan to the left edge">Reset</button>
         <button id="scanFullscreen" class="fullscreen-button" type="button">
@@ -134,10 +193,24 @@
       <header class="panel-header">
         <h1>Street Art<br>Sonification</h1>
         <div class="panel-meta">
-          <span class="local-state"><i></i> Local models</span>
           <button id="logicOpen" class="logic-open" type="button">Interaction logic</button>
         </div>
       </header>
+
+      <section class="output-mode-section" aria-label="Audio output mode">
+        <div class="output-mode-heading">
+          <div><strong>Audio Output</strong></div>
+          <small id="outputModeStatus">MIDI Out</small>
+        </div>
+        <div class="output-mode-switch" role="group" aria-label="Choose audio output">
+          <button type="button" data-output-mode="web" aria-pressed="false">
+            <span>WEB AUDIO</span><small>Hear sound in this page</small>
+          </button>
+          <button class="active" type="button" data-output-mode="midi" aria-pressed="true">
+            <span>MIDI OUT</span><small>Send notes and controls</small>
+          </button>
+        </div>
+      </section>
 
       <section class="volume-section" aria-label="Sound output level">
         <div class="volume-label">
@@ -150,8 +223,8 @@
 
       <section class="music-section" aria-label="Global musical settings">
         <div class="music-heading">
-          <div><span>MUSIC</span><strong>Global system</strong></div>
-          <small>Shared by pointer, gaze, scan and live output</small>
+          <div><strong>Global System</strong></div>
+          <small id="musicSourceStatus">Real-time algorithm</small>
         </div>
         <div class="music-controls">
           <label for="musicBpm"><span>BPM</span><input id="musicBpm" type="number" min="40" max="200" step="1" value="72"></label>
@@ -170,58 +243,41 @@
         </div>
       </section>
 
-      <section class="control-section input-section">
+      <section class="control-section session-section">
         <div class="section-heading">
-          <span>INPUT</span>
-          <h2>Artwork</h2>
+          <h2>Current Artwork</h2>
         </div>
-        <label id="dropZone" class="drop-zone" for="fileInput">
-          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V19h16v-2.5M12 4v11m0-11L7.5 8.5M12 4l4.5 4.5"/></svg>
-          <span><strong>Drop an image</strong> or choose a file</span>
-          <small>JPG, PNG or WebP · up to 16 MB</small>
-        </label>
-        <div id="fileInfo" class="file-info">
-          <span class="thumbnail"><img id="thumbImage" alt="Current artwork thumbnail"></span>
-          <span><strong id="fileName">the-defiant-one.webp</strong><small id="fileMeta">Sample artwork · analysed</small></span>
-          <button id="clearFile" type="button" aria-label="Restore sample artwork">×</button>
+        <div class="session-artwork">
+          <span class="thumbnail"><img id="thumbImage" src="/assets/demo/image" alt="Current artwork thumbnail"></span>
+          <span><strong id="currentArtName">the-defiant-one.webp</strong><small id="currentStatement">No artist statement</small></span>
         </div>
-        <label class="statement-field">
-          <span>Artist statement <small>optional</small></span>
-          <textarea id="statement" rows="3" placeholder="What is the work about? Why was it made?"></textarea>
-        </label>
-        <button id="analyzeButton" class="primary-button" type="button">
-          <span>Analyse image</span>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
-        </button>
-        <p id="statusText" class="status-text" role="status">The sample is ready. Move across the image to begin.</p>
       </section>
 
       <section class="control-section regions-section">
         <div class="section-heading inline">
-          <div><span>MAP</span><h2>Regions</h2></div>
+          <div><h2>Regions</h2></div>
           <span id="regionCount" class="count-pill">9</span>
         </div>
         <div id="regionList" class="region-list" aria-label="Detected regions"></div>
       </section>
 
-      <section class="control-section external-section" aria-label="External MIDI and OSC output">
+      <section class="control-section external-section" aria-label="Advanced MIDI and OSC control mapping">
         <div class="section-heading inline">
-          <div><span>ROUTING</span><h2>External Output</h2></div>
+          <div><h2>Advanced Control Mapping</h2></div>
           <span id="externalStatus" class="external-pill"><i></i> Off</span>
         </div>
         <label class="external-enable">
-          <span><strong>Send mapped control</strong><small>Web Audio remains independent</small></span>
+          <span><strong>Enable control mapping</strong><small>Optional MIDI CC and OSC parameters</small></span>
           <input id="externalEnabled" type="checkbox" role="switch" aria-label="Enable external output">
           <i aria-hidden="true"></i>
         </label>
 
         <details class="route-card" open>
-          <summary><span><b>OSC</b><small>Network control messages</small></span><i aria-hidden="true"></i></summary>
+          <summary><span><b>OSC</b></span><i aria-hidden="true"></i></summary>
           <div class="route-fields osc-fields">
             <label><span>HOST</span><input id="oscHost" type="text" value="127.0.0.1" spellcheck="false"></label>
             <label><span>PORT</span><input id="oscPort" type="number" min="1" max="65535" value="9000"></label>
-            <button id="oscTest" class="route-test" type="button">Send test</button>
+            <button id="oscTest" class="route-test" type="button">Send</button>
           </div>
         </details>
 
@@ -250,7 +306,7 @@
 
       <section class="control-section output-section">
         <div class="section-heading inline">
-          <div><span>OUTPUT</span><h2>Interaction Signal</h2></div>
+          <div><h2>Interaction Signal</h2></div>
           <span id="socketStatus" class="socket-pill"><i></i> Connected</span>
         </div>
         <pre id="outputJson" aria-label="Current interaction signal">{
@@ -277,22 +333,25 @@
       <div class="logic-blocks">
         <article>
           <strong>Pointer / Gaze</strong>
-          <p>Use the mouse or local webcam gaze tracking to explore one region at a time. Y selects notes inside the global mode, X controls stereo, movement adds energy, and boundaries create clicks.</p>
+          <p>Each region selects a track from the ten-minute master score. Pointer and gaze follow one shared timeline and reveal the active region track.</p>
         </article>
         <article>
           <strong>Left-to-Right Scan</strong>
-          <p>The scan crosses the complete artwork over a duration you choose. Up to five regions can sound together.</p>
+          <p>The scan can last up to ten minutes. A five-minute scan plays 00:00–05:00 of the master score while the image activates up to five region tracks.</p>
         </article>
         <article class="logic-mapping">
           <strong>Sound mapping</strong>
           <dl>
-            <div><dt>BPM and mode</dt><dd>Shared timing and pitch system</dd></div>
+            <div><dt>Region</dt><dd>One of nine instrument roles and MIDI channels</dd></div>
+            <div><dt>BPM and mode</dt><dd>Shared timing and pitch system in any of the twelve keys</dd></div>
+            <div><dt>Harmony</dt><dd>Artwork-selected major or minor progressions with inversions, open voicings and tensions</dd></div>
+            <div><dt>Rhythm</dt><dd>Long notes, rests, dotted values, syncopation, sixteenths and triplets</dd></div>
             <div><dt>Region meaning</dt><dd>Voice and musical role</dd></div>
             <div><dt>Vertical position</dt><dd>Pitch</dd></div>
             <div><dt>Horizontal position</dt><dd>Time and musical form</dd></div>
-            <div><dt>Brightness</dt><dd>Harmonic richness</dd></div>
-            <div><dt>Colour</dt><dd>Short sound events</dd></div>
-            <div><dt>Saturation</dt><dd>Event and harmonic strength</dd></div>
+            <div><dt>Brightness</dt><dd>Register, voicing and harmonic colour</dd></div>
+            <div><dt>Colour</dt><dd>Motif and pattern variation</dd></div>
+            <div><dt>Saturation</dt><dd>7th, 9th, 11th and 13th tension density</dd></div>
             <div><dt>Region coverage</dt><dd>Volume</dd></div>
             <div><dt>Texture</dt><dd>Noise and filter detail</dd></div>
           </dl>
@@ -308,8 +367,8 @@
   <div id="calibrationOverlay" class="calibration-overlay" hidden>
     <div class="calibration-copy">
       <span>WEBEYETRACK · LOCAL CALIBRATION</span>
-      <strong>Look at the target, hold still, then click it.</strong>
-      <small id="calibrationProgress">Point 1 of 9</small>
+      <strong>Keep your head still, look at the target, then click when it is ready.</strong>
+      <small id="calibrationProgress">Point 1 of 12</small>
     </div>
     <button id="calibrationCancel" class="calibration-cancel" type="button">Cancel</button>
     <button id="calibrationTarget" class="calibration-target" type="button" aria-label="Eye-tracking calibration target"><i></i><span>HOLD</span></button>
@@ -317,6 +376,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=20261019-handpainted3"></script>
+  <script src="/static/app.js?v=20261021-midi-default1"></script>
 </body>
 </html>

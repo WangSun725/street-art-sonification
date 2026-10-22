@@ -20,6 +20,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, W
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from image_preprocessing import ImagePreparationError, prepare_uploaded_image
 from output_bridge import ExternalOutputManager
 
 
@@ -72,15 +73,46 @@ def demo_payload() -> dict[str, Any]:
 
 
 def extract_json(text: str) -> dict[str, Any]:
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-    candidate = fenced.group(1) if fenced else None
-    if candidate is None:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            candidate = text[start : end + 1]
-    if not candidate:
-        raise ValueError("The vision model did not return JSON")
-    return json.loads(candidate)
+    """Return the first complete region object from a model response.
+
+    Local vision models occasionally add a second JSON object, a short note,
+    or Markdown fences after the requested payload. ``json.loads`` rejects
+    that otherwise usable response as ``Extra data``. ``raw_decode`` stops at
+    the end of the first complete value, so scan each opening brace and keep
+    the first object that contains the expected regions array.
+    """
+    decoder = json.JSONDecoder()
+    decoded_objects: list[dict[str, Any]] = []
+    region_objects: list[dict[str, Any]] = []
+    for match in re.finditer(r"[\{\[]", text):
+        try:
+            value, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            region_objects.append({"regions": value})
+            continue
+        if not isinstance(value, dict):
+            continue
+        if isinstance(value.get("regions"), list):
+            region_objects.append(value)
+            continue
+        decoded_objects.append(value)
+    if region_objects:
+        def proposal_score(value: dict[str, Any]) -> tuple[int, int]:
+            regions = value.get("regions", [])
+            complete = sum(
+                1 for item in regions
+                if isinstance(item, dict)
+                and isinstance(item.get("bbox"), list) and len(item["bbox"]) >= 4
+                and isinstance(item.get("point"), list) and len(item["point"]) >= 2
+            )
+            return complete, len(regions)
+
+        return max(region_objects, key=proposal_score)
+    if decoded_objects:
+        return decoded_objects[0]
+    raise ValueError("The vision model did not return valid JSON")
 
 
 def slug(value: str, fallback: str) -> str:
@@ -102,12 +134,19 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         try:
             box = [max(0, min(1000, int(float(v)))) for v in item["bbox"][:4]]
-            point = [max(0, min(1000, int(float(v)))) for v in item["point"][:2]]
         except (KeyError, TypeError, ValueError):
+            continue
+        if len(box) != 4:
             continue
         x1, y1, x2, y2 = box
         if x2 - x1 < 25 or y2 - y1 < 25:
             continue
+        try:
+            point = [max(0, min(1000, int(float(v)))) for v in item.get("point", [])[:2]]
+            if len(point) != 2:
+                raise ValueError
+        except (TypeError, ValueError):
+            point = [(x1 + x2) // 2, (y1 + y2) // 2]
         # Different abstract labels on the same rectangle are not different
         # playable regions. Remove near-identical proposals before SAM.
         def overlap(a: list[int], b: list[int]) -> float:
@@ -119,24 +158,51 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
         if any(overlap(box, previous) > 0.92 for previous in seen_boxes):
             continue
         seen_boxes.append(box)
-        label = str(item.get("label") or f"Region {index + 1}").strip()[:48]
-        region_type = str(item.get("type", "detail")).lower()
+        region_name = str(item.get("region") or "").strip()
+        label = str(item.get("label") or region_name or f"Region {index + 1}").strip()[:48]
+        generic_labels = {
+            "main painted figure or largest focal object",
+            "face or focal internal detail",
+            "gesture, hand, accessory or held object",
+            "one actual painted lettering or glyph cluster",
+            "a second different painted mark or color field",
+            "exposed wall/material region",
+            "paint drip, crack, weathering or spray texture",
+            "another small distinctive painted symbol or detail",
+            "one additional concrete painted object, mark, or material feature when clearly visible",
+            "short english label",
+        }
+        meaning = str(item.get("meaning") or "").strip()
+        if label.lower() in generic_labels:
+            if region_name:
+                label = region_name
+            elif meaning:
+                # Small local VLMs occasionally copy a schema placeholder even
+                # when asked for a concrete label. The interpretation is still
+                # image-specific, so use its opening phrase as the visible name.
+                label = re.sub(r"^(the|a|an)\s+", "", meaning, flags=re.IGNORECASE)
+                label = re.split(r"[,;]", label, maxsplit=1)[0].strip()[:48]
+        region_type = str(item.get("type") or "").lower()
         if region_type not in valid_types:
-            region_type = "detail"
+            semantic_hint = f"{region_name} {label} {meaning}".lower()
+            region_type = next((kind for kind in valid_types if kind in semantic_hint), "figure" if index == 0 else "detail")
         margin_x = max(8, int((x2 - x1) * 0.06))
         margin_y = max(8, int((y2 - y1) * 0.06))
         if not (x1 + margin_x <= point[0] <= x2 - margin_x and y1 + margin_y <= point[1] <= y2 - margin_y):
             point = [(x1 + x2) // 2, (y1 + y2) // 2]
+        raw_id = str(item.get("id") or "").strip()
+        if raw_id.lower() in {"snake_case", "region_id", "id"} or raw_id.isdigit():
+            raw_id = ""
         proposals.append({
-            "id": slug(str(item.get("id") or label), f"region_{index + 1}"),
+            "id": slug(raw_id or region_name or label, f"region_{index + 1}"),
             "label": label,
             "type": region_type,
             "bbox": box,
             "point": point,
-            "meaning": str(item.get("meaning") or "").strip()[:180],
+            "meaning": meaning[:180],
             "color_rgb": colors[len(proposals) % len(colors)],
         })
-        if len(proposals) == 10:
+        if len(proposals) == 9:
             break
 
     fallbacks = [
@@ -163,13 +229,56 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return proposals
 
 
+def normalize_artwork(raw: dict[str, Any], preprocessing: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the model's conservative whole-artwork framing proposal."""
+    width = preprocessing["prepared_size"]["width"]
+    height = preprocessing["prepared_size"]["height"]
+    cx1, cy1, cx2, cy2 = preprocessing["content_box"]
+    content_box = [
+        round(cx1 / width * 1000), round(cy1 / height * 1000),
+        round(cx2 / width * 1000), round(cy2 / height * 1000),
+    ]
+    item = raw.get("artwork") if isinstance(raw.get("artwork"), dict) else {}
+    try:
+        box = [max(0, min(1000, int(float(value)))) for value in item.get("bbox", content_box)[:4]]
+        point = [max(0, min(1000, int(float(value)))) for value in item.get("point", [500, 500])[:2]]
+        if len(box) != 4 or len(point) != 2 or box[2] <= box[0] or box[3] <= box[1]:
+            raise ValueError
+    except (TypeError, ValueError):
+        box = content_box
+        point = [(content_box[0] + content_box[2]) // 2, (content_box[1] + content_box[3]) // 2]
+    try:
+        confidence = max(0.0, min(1.0, float(item.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return {
+        "full_frame": bool(item.get("full_frame", True)),
+        "confidence": round(confidence, 4),
+        "bbox": box,
+        "point": point,
+    }
+
+
+def extract_first_object(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            value, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("The vision model did not return a JSON object")
+
+
 def qwen_prompt(statement: str) -> str:
     context = statement.strip() or "No artist statement was supplied. Infer only visually evident content."
     return f"""Analyze this completed street-art image as material for an accessible interactive sound artwork.
 Artist statement: {context[:1200]}
 Return ONLY valid JSON, no markdown. Use this schema:
-{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure|face|gesture|lettering|wall|texture|detail|symbol|fill","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}]}}
-Coordinates are normalized integers 0-1000. Return exactly 8 distinct playable regions, one for each line below. If a listed feature is absent, replace it with another concrete visible painted shape:
+{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure|face|gesture|lettering|wall|texture|detail|symbol|fill","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"music_plan":{{"bpm":72,"root":"D","mode":"major|minor|dorian|phrygian|mixolydian|minorPentatonic","meter":"4/4"}}}}
+The schema strings describe the format only. Never output the literal values "snake_case", "short English label", or a pipe-separated list. Create a unique concrete id, label, and one single type for every detected region.
+Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regions, using the list below as a visual guide. If a listed feature is absent, replace it with another concrete visible painted shape:
 1. main painted figure or largest focal object
 2. face or focal internal detail
 3. gesture, hand, accessory or held object
@@ -178,7 +287,51 @@ Coordinates are normalized integers 0-1000. Return exactly 8 distinct playable r
 6. exposed wall/material region
 7. paint drip, crack, weathering or spray texture
 8. another small distinctive painted symbol or detail
-Every label must name what is visibly there (for example "woman with sunglasses", "black upper-left glyphs", "yellow wall field"), never only an abstract word such as "color", "texture", "detail" or "symbol". Use at most one box covering more than 60% of the image. All other boxes must tightly surround different visible shapes. Nested details are allowed, but duplicate boxes are forbidden. Each point must be well inside the intended painted shape, not on a box edge or empty background. Keep meaning under 12 words and connect the visible mark to a tactile or sonic quality."""
+9. one additional concrete painted object, mark, or material feature when clearly visible
+Every label must name what is visibly there (for example "woman with sunglasses", "black upper-left glyphs", "yellow wall field"), never only an abstract word such as "color", "texture", "detail" or "symbol". Use at most one box covering more than 60% of the image. All other boxes must tightly surround different visible shapes. Nested details are allowed, but duplicate boxes are forbidden. Each point must be well inside the intended painted shape, not on a box edge or empty background. Keep meaning under 12 words and connect the visible mark to a tactile or sonic quality.
+Choose the music_plan from the combined emotional character of the visible artwork and Artist Statement. It controls the deterministic real-time sonification engine; it is not a request to generate a song. Use BPM 40-180, one valid root, one valid mode, and 4/4 meter."""
+
+
+def qwen_regions_retry_prompt(statement: str) -> str:
+    context = statement.strip() or "No artist statement was supplied."
+    return f"""Identify 6 to 9 distinct visible regions in this street-art image.
+Artist statement: {context[:600]}
+Return ONLY one valid JSON object with a regions array. Each item must have a unique concrete id, a short visible English label, exactly one type, bbox, point, and a meaning under 12 words. Valid types are figure, face, gesture, lettering, wall, texture, detail, symbol, and fill. Coordinates are integers from 0 to 1000. Bbox has four numbers. Point has exactly two numbers well inside the visible shape. Never use schema placeholders or pipe-separated values. Prefer actual painted figures, faces, hands, lettering, marks, colour fields, wall material, drips, cracks, and spray texture. Do not repeat boxes."""
+
+
+def normalize_music_plan(raw: dict[str, Any]) -> dict[str, Any]:
+    item = raw.get("music_plan") if isinstance(raw.get("music_plan"), dict) else {}
+    valid_modes = {"major", "minor", "dorian", "phrygian", "mixolydian", "minorPentatonic"}
+    root = str(item.get("root", "D")).strip().upper().replace("♯", "#")
+    if root not in {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}:
+        root = "D"
+    mode = str(item.get("mode", "dorian")).strip()
+    if mode not in valid_modes:
+        mode = "dorian"
+    try:
+        bpm = max(40, min(180, round(float(item.get("bpm", 72)))))
+    except (TypeError, ValueError):
+        bpm = 72
+    return {
+        "bpm": bpm,
+        "root": root,
+        "mode": mode,
+        "meter": "4/4",
+    }
+
+
+def qwen_artwork_prompt(preprocessing: dict[str, Any]) -> str:
+    width = preprocessing["prepared_size"]["width"]
+    height = preprocessing["prepared_size"]["height"]
+    x1, y1, x2, y2 = preprocessing["content_box"]
+    content_box = [
+        round(x1 / width * 1000), round(y1 / height * 1000),
+        round(x2 / width * 1000), round(y2 / height * 1000),
+    ]
+    return f"""Find the outer boundary of the complete street-art work in this photograph.
+The real photograph occupies normalized rectangle {content_box}. Ignore any padding outside it.
+Return only one JSON object with four fields: full_frame, confidence, bbox, and point.
+Set full_frame to true and bbox to the complete photograph rectangle whenever the photograph is already entirely street art, wall texture belongs to the work, the painted parts are disconnected, or the boundary is uncertain. Set full_frame to false only when a clearly bounded mural or graffiti work has unrelated scenery around it. The bbox must include every painted part, lettering, and relevant wall surface. Point must be exactly two numbers inside the work. Confidence is from 0 to 1."""
 
 
 async def run_command(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -193,11 +346,11 @@ async def run_command(command: list[str], timeout: int) -> subprocess.CompletedP
     )
 
 
-async def analyze_job(job_id: str, image_path: Path, statement: str) -> None:
+async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessing: dict[str, Any]) -> None:
     job = jobs[job_id]
     async with analysis_lock:
         try:
-            job.update(stage="vision", message="Reading the street-art elements…", progress=18)
+            job.update(stage="vision", message="Reading the artwork…", progress=18)
             qwen = await run_command([
                 str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
                 "--model", str(QWEN_MODEL), "--image", str(image_path),
@@ -206,11 +359,52 @@ async def analyze_job(job_id: str, image_path: Path, statement: str) -> None:
             ], timeout=240)
             if qwen.returncode != 0:
                 raise RuntimeError(qwen.stderr.strip()[-600:] or "Vision analysis failed")
-            proposals = normalize_proposals(extract_json(qwen.stdout))
+            (image_path.parent / "vision-output.txt").write_text(qwen.stdout, encoding="utf-8")
+            try:
+                raw_analysis = extract_json(qwen.stdout)
+            except ValueError:
+                raw_analysis = {}
+            raw_regions = raw_analysis.get("regions") if isinstance(raw_analysis.get("regions"), list) else []
+            if len(raw_regions) < 4:
+                job.update(stage="vision", message="Refining the region reading…", progress=27)
+                retry = await run_command([
+                    str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+                    "--model", str(QWEN_MODEL), "--image", str(image_path),
+                    "--prompt", qwen_regions_retry_prompt(statement), "--max-tokens", "1000",
+                    "--temperature", "0", "--no-verbose",
+                ], timeout=240)
+                (image_path.parent / "vision-retry-output.txt").write_text(retry.stdout, encoding="utf-8")
+                if retry.returncode != 0:
+                    raise RuntimeError(retry.stderr.strip()[-600:] or "Vision analysis retry failed")
+                retry_analysis = extract_json(retry.stdout)
+                if "music_plan" not in retry_analysis and isinstance(raw_analysis.get("music_plan"), dict):
+                    retry_analysis["music_plan"] = raw_analysis["music_plan"]
+                raw_analysis = retry_analysis
+            proposals = normalize_proposals(raw_analysis)
+            music_plan = normalize_music_plan(raw_analysis)
+            job.update(stage="vision", message="Checking the artwork boundary…", progress=36)
+            boundary = await run_command([
+                str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+                "--model", str(QWEN_MODEL), "--image", str(image_path),
+                "--prompt", qwen_artwork_prompt(preprocessing), "--max-tokens", "280",
+                "--temperature", "0", "--no-verbose",
+            ], timeout=180)
+            artwork_payload: dict[str, Any] = {}
+            if boundary.returncode == 0:
+                (image_path.parent / "artwork-boundary-output.txt").write_text(boundary.stdout, encoding="utf-8")
+                try:
+                    artwork_payload = {"artwork": extract_first_object(boundary.stdout)}
+                except ValueError:
+                    artwork_payload = {}
+            artwork = normalize_artwork(artwork_payload, preprocessing)
             proposal_path = image_path.parent / "proposals.json"
-            proposal_path.write_text(json.dumps({"regions": proposals}, ensure_ascii=False, indent=2), encoding="utf-8")
+            proposal_path.write_text(json.dumps({
+                "artwork": artwork,
+                "preprocessing": preprocessing,
+                "regions": proposals,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            job.update(stage="segment", message=f"Defining {len(proposals)} interactive regions…", progress=52)
+            job.update(stage="segment", message=f"Defining {len(proposals)} interactive regions…", progress=45)
             result_dir = image_path.parent / "result"
             sam = await run_command([
                 str(SAM_PYTHON), str(SAM_SCRIPT),
@@ -222,17 +416,20 @@ async def analyze_job(job_id: str, image_path: Path, statement: str) -> None:
 
             manifest_path = result_dir / "regions.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            job.update(stage="music", message="Preparing the algorithmic music system…", progress=92)
+            processed_image = manifest.get("processed_image", "artwork.png")
             manifest.update({
                 "analysis_id": job_id,
-                "image_url": f"/runtime/jobs/{job_id}/{image_path.name}",
+                "image_url": f"/runtime/jobs/{job_id}/result/{processed_image}",
                 "status": "ready",
                 "artist_statement": statement,
+                "music_plan": music_plan,
             })
             for region in manifest["regions"]:
                 region["visual_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['visual_mask']}"
                 region["hit_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['hit_mask']}"
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            job.update(status="ready", stage="ready", message="Analysis complete. The artwork is ready to explore.", progress=100, result=manifest)
+            job.update(status="ready", stage="ready", message="Image regions and algorithmic music system are ready.", progress=100, result=manifest)
         except Exception as exc:
             job.update(status="error", stage="error", message=str(exc), progress=100)
 
@@ -280,24 +477,34 @@ async def api_analyze(
     if not data:
         raise HTTPException(status_code=400, detail="The image file is empty.")
 
-    if hashlib.sha256(data).digest() == hashlib.sha256(DEMO_IMAGE.read_bytes()).digest():
+    # Reuse the prepared demo only when no statement needs interpreting. A
+    # statement should always reach Qwen so it can influence the region reading.
+    if not statement.strip() and hashlib.sha256(data).digest() == hashlib.sha256(DEMO_IMAGE.read_bytes()).digest():
         return JSONResponse(demo_payload())
 
     job_id = uuid.uuid4().hex[:12]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True)
     extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image.content_type]
-    image_path = job_dir / f"artwork{extension}"
-    image_path.write_bytes(data)
+    source_path = job_dir / f"source{extension}"
+    source_path.write_bytes(data)
+    image_path = job_dir / "prepared.png"
+    try:
+        preprocessing = await asyncio.to_thread(prepare_uploaded_image, data, image_path)
+    except ImagePreparationError as exc:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     jobs[job_id] = {
         "analysis_id": job_id,
         "status": "analyzing",
         "stage": "queued",
-        "message": "Image received. Preparing the analysis…",
+        "message": "Preparing the artwork…",
         "progress": 5,
         "created_at": time.time(),
+        "warnings": preprocessing.get("warnings", []),
     }
-    asyncio.create_task(analyze_job(job_id, image_path, statement))
+    (job_dir / "preprocessing.json").write_text(json.dumps(preprocessing, indent=2), encoding="utf-8")
+    asyncio.create_task(analyze_job(job_id, image_path, statement, preprocessing))
     return JSONResponse(jobs[job_id], status_code=202)
 
 

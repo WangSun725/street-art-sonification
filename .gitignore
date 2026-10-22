@@ -5,6 +5,9 @@
 .art2mus-env/
 .art2mus-reference-env/
 .interaction-env/
+# Retired local research environments are not part of the application.
+.text2midi-env/
+.midi-llm-env/
 **/__pycache__/
 *.pyc
 .DS_Store

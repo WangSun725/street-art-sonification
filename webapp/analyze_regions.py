@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 from pathlib import Path
@@ -69,6 +70,175 @@ def unique_id(value: str, used: set[str], index: int) -> str:
     return candidate
 
 
+def clamp_rect(rect: list[int], bounds: list[int]) -> list[int]:
+    x1 = max(bounds[0], min(bounds[2] - 1, rect[0]))
+    y1 = max(bounds[1], min(bounds[3] - 1, rect[1]))
+    x2 = max(x1 + 1, min(bounds[2], rect[2]))
+    y2 = max(y1 + 1, min(bounds[3], rect[3]))
+    return [x1, y1, x2, y2]
+
+
+def normalized_rect(box: list[int], width: int, height: int) -> list[int]:
+    return [
+        round(box[0] / 1000 * width), round(box[1] / 1000 * height),
+        round(box[2] / 1000 * width), round(box[3] / 1000 * height),
+    ]
+
+
+def mask_bounds(mask: np.ndarray) -> list[int] | None:
+    ys, xs = np.where(mask)
+    if not len(xs):
+        return None
+    return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+
+def rect_area(rect: list[int]) -> int:
+    return max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+
+
+def intersection_over_union(a: list[int], b: list[int]) -> float:
+    intersection = rect_area([
+        max(a[0], b[0]), max(a[1], b[1]),
+        min(a[2], b[2]), min(a[3], b[3]),
+    ])
+    union = rect_area(a) + rect_area(b) - intersection
+    return intersection / union if union else 0.0
+
+
+def choose_artwork_crop(
+    predictor: SAM2ImagePredictor,
+    artwork: dict,
+    proposals: list[dict],
+    content_rect: list[int],
+    width: int,
+    height: int,
+) -> tuple[list[int], dict]:
+    """Choose a conservative crop; uncertain or full-frame work is untouched."""
+    content_area = max(1, rect_area(content_rect))
+    proposed = clamp_rect(normalized_rect(artwork.get("bbox", [0, 0, 1000, 1000]), width, height), content_rect)
+    confidence = float(artwork.get("confidence", 0.0))
+    area_ratio = rect_area(proposed) / content_area
+    margins = [
+        proposed[0] - content_rect[0], proposed[1] - content_rect[1],
+        content_rect[2] - proposed[2], content_rect[3] - proposed[3],
+    ]
+    meaningful_margins = sum((
+        margins[0] >= (content_rect[2] - content_rect[0]) * 0.035,
+        margins[2] >= (content_rect[2] - content_rect[0]) * 0.035,
+        margins[1] >= (content_rect[3] - content_rect[1]) * 0.035,
+        margins[3] >= (content_rect[3] - content_rect[1]) * 0.035,
+    ))
+    should_crop = (
+        not bool(artwork.get("full_frame", True))
+        and confidence >= 0.82
+        and 0.06 <= area_ratio <= 0.82
+        and meaningful_margins >= 2
+    )
+    # A crop is not trusted when Qwen's own playable regions disagree with its
+    # outer artwork boundary. Keeping extra scenery is safer than deleting part
+    # of a full-frame mural.
+    if should_crop:
+        for proposal in proposals:
+            if proposal.get("type") in {"wall", "texture", "fill"}:
+                continue
+            region_rect = clamp_rect(normalized_rect(proposal["bbox"], width, height), content_rect)
+            overlap = rect_area([
+                max(region_rect[0], proposed[0]), max(region_rect[1], proposed[1]),
+                min(region_rect[2], proposed[2]), min(region_rect[3], proposed[3]),
+            ])
+            if overlap / max(1, rect_area(region_rect)) < 0.55:
+                should_crop = False
+                break
+    if not should_crop:
+        return content_rect, {
+            "applied": False,
+            "reason": "full_frame_uncertain_or_region_disagreement",
+            "model_full_frame": bool(artwork.get("full_frame", True)),
+            "model_confidence": round(confidence, 4),
+            "model_box": proposed,
+        }
+
+    point = artwork.get("point", [500, 500])
+    px = max(proposed[0], min(proposed[2] - 1, round(point[0] / 1000 * width)))
+    py = max(proposed[1], min(proposed[3] - 1, round(point[1] / 1000 * height)))
+    box = np.asarray(proposed, dtype=np.float32)
+    masks, scores, _ = predictor.predict(
+        point_coords=np.asarray([[px, py]], dtype=np.float32),
+        point_labels=np.asarray([1], dtype=np.int32),
+        box=box,
+        multimask_output=True,
+    )
+    best_bounds: list[int] | None = None
+    best_rank = -1.0
+    for mask, score in zip(masks, scores):
+        candidate = mask_bounds(clean_mask(mask))
+        if candidate is None:
+            continue
+        candidate = clamp_rect(candidate, content_rect)
+        size_ratio = rect_area(candidate) / max(1, rect_area(proposed))
+        if not 0.25 <= size_ratio <= 2.8:
+            continue
+        rank = float(score) + intersection_over_union(candidate, proposed) * 0.35
+        if rank > best_rank:
+            best_rank = rank
+            best_bounds = candidate
+
+    # The detector box remains part of the crop even when SAM contracts to one
+    # connected painted component. This protects disconnected lettering and
+    # wall texture from accidental removal.
+    combined = proposed if best_bounds is None else [
+        min(proposed[0], best_bounds[0]), min(proposed[1], best_bounds[1]),
+        max(proposed[2], best_bounds[2]), max(proposed[3], best_bounds[3]),
+    ]
+    margin_x = round((content_rect[2] - content_rect[0]) * 0.025)
+    margin_y = round((content_rect[3] - content_rect[1]) * 0.025)
+    crop = clamp_rect([
+        combined[0] - margin_x, combined[1] - margin_y,
+        combined[2] + margin_x, combined[3] + margin_y,
+    ], content_rect)
+    if rect_area(crop) / content_area > 0.92:
+        return content_rect, {
+            "applied": False,
+            "reason": "crop_too_close_to_full_frame",
+            "model_full_frame": False,
+            "model_confidence": round(confidence, 4),
+            "model_box": proposed,
+        }
+    return crop, {
+        "applied": True,
+        "reason": "clear_external_background",
+        "model_full_frame": False,
+        "model_confidence": round(confidence, 4),
+        "model_box": proposed,
+        "sam_box": best_bounds,
+    }
+
+
+def remap_proposal(proposal: dict, crop: list[int], source_width: int, source_height: int) -> dict | None:
+    crop_width, crop_height = crop[2] - crop[0], crop[3] - crop[1]
+    source_box = normalized_rect(proposal["bbox"], source_width, source_height)
+    clipped = clamp_rect(source_box, crop)
+    if rect_area(clipped) < 16:
+        return None
+    source_point = proposal.get("point", [500, 500])
+    px = round(source_point[0] / 1000 * source_width)
+    py = round(source_point[1] / 1000 * source_height)
+    if not (clipped[0] <= px < clipped[2] and clipped[1] <= py < clipped[3]):
+        px, py = (clipped[0] + clipped[2]) // 2, (clipped[1] + clipped[3]) // 2
+    mapped = copy.deepcopy(proposal)
+    mapped["bbox"] = [
+        round((clipped[0] - crop[0]) / crop_width * 1000),
+        round((clipped[1] - crop[1]) / crop_height * 1000),
+        round((clipped[2] - crop[0]) / crop_width * 1000),
+        round((clipped[3] - crop[1]) / crop_height * 1000),
+    ]
+    mapped["point"] = [
+        round((px - crop[0]) / crop_width * 1000),
+        round((py - crop[1]) / crop_height * 1000),
+    ]
+    return mapped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True, type=Path)
@@ -81,17 +251,35 @@ def main() -> None:
     if image_bgr is None:
         raise SystemExit("Could not read uploaded image")
     height, width = image_bgr.shape[:2]
-    max_side = 1800
-    if max(height, width) > max_side:
-        scale = max_side / max(height, width)
-        image_bgr = cv2.resize(image_bgr, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
-        height, width = image_bgr.shape[:2]
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    proposals = json.loads(args.proposals.read_text(encoding="utf-8"))["regions"]
+    proposal_payload = json.loads(args.proposals.read_text(encoding="utf-8"))
+    preprocessing = proposal_payload.get("preprocessing", {})
+    proposals = proposal_payload["regions"]
+    content_rect = clamp_rect(preprocessing.get("content_box", [0, 0, width, height]), [0, 0, width, height])
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = build_sam2(CONFIG, str(CHECKPOINT), device=device)
     predictor = SAM2ImagePredictor(model)
+    predictor.set_image(image_rgb)
+
+    with torch.inference_mode():
+        crop, isolation = choose_artwork_crop(
+            predictor,
+            proposal_payload.get("artwork", {}),
+            proposals,
+            content_rect,
+            width,
+            height,
+        )
+    prepared_width, prepared_height = width, height
+    image_bgr = image_bgr[crop[1]:crop[3], crop[0]:crop[2]].copy()
+    height, width = image_bgr.shape[:2]
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    cv2.imwrite(str(args.output / "artwork.png"), image_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 5])
+    proposals = [
+        mapped for proposal in proposals
+        if (mapped := remap_proposal(proposal, crop, prepared_width, prepared_height)) is not None
+    ]
     predictor.set_image(image_rgb)
 
     output_regions: list[dict] = []
@@ -135,8 +323,22 @@ def main() -> None:
                 "method": "Qwen3-VL proposal + SAM 2.1 Tiny mask",
             })
 
+    preprocessing["crop"] = {
+        **isolation,
+        "prepared_rect": crop,
+        "removed_analysis_padding": preprocessing.get("padding", {}).get("applied", False),
+    }
+    preprocessing["output_size"] = {"width": width, "height": height}
+    preprocessing["coordinate_transform"] = {
+        "oriented_source_to_prepared_scale": preprocessing.get("resize", {}).get("scale", 1.0),
+        "prepared_padding": preprocessing.get("padding", {}),
+        "prepared_to_output_crop_origin": {"x": crop[0], "y": crop[1]},
+    }
     (args.output / "regions.json").write_text(json.dumps({
         "image_size": {"width": width, "height": height},
+        "processed_image": "artwork.png",
+        "preprocessing": preprocessing,
+        "artwork_isolation": isolation,
         "proposal_source": "Qwen3-VL 2B Instruct 4-bit",
         "mask_model": "SAM 2.1 Hiera Tiny",
         "device": device,

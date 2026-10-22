@@ -50,8 +50,9 @@ def main() -> int:
                 if kind == "note":
                     note = max(0, min(127, int(message.get("note", 60))))
                     velocity = max(1, min(127, int(message.get("value", 96))))
+                    duration = max(.04, min(12, float(message.get("duration", .12))))
                     output.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel))
-                    timer = threading.Timer(.12, note_off, args=(note, channel))
+                    timer = threading.Timer(duration, note_off, args=(note, channel))
                     timer.daemon = True
                     timer.start()
                 elif kind == "cc":

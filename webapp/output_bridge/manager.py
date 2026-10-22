@@ -136,6 +136,8 @@ class ExternalOutputManager:
         self._smooth: dict[str, tuple[float, float]] = {}
         self._last_sent: dict[str, tuple[float, float]] = {}
         self._last_region: str | None = None
+        self._last_output_mode: str | None = None
+        self._last_voice_events: dict[str, str] = {}
         self._lock = threading.RLock()
         self.last_activity: dict[str, Any] = {
             "status": "idle",
@@ -295,11 +297,28 @@ class ExternalOutputManager:
         with self._lock:
             region = frame.get("region") if isinstance(frame.get("region"), dict) else None
             region_id = str(region.get("id")) if region else None
-            region_entered = bool(region_id and region_id != self._last_region)
+            output_mode = str(frame.get("outputMode") or "web")
+            mode_changed = output_mode != self._last_output_mode
+            region_entered = bool(region_id and (region_id != self._last_region or mode_changed))
+            if mode_changed:
+                self._last_voice_events.clear()
             self._last_region = region_id
+            self._last_output_mode = output_mode
             now = time.monotonic()
+            if output_mode == "midi":
+                try:
+                    self._send_performance_events(frame, region_id, region_entered)
+                except Exception as exc:
+                    self._record("error", "midi", "performance pattern", None, str(exc))
             for mapping in self.config["mappings"]:
                 if not mapping["enabled"]:
+                    continue
+                if mapping["id"] == "performance-region-note" and _nested(frame, "music.activeVoices"):
+                    continue
+                # The performance UI treats browser sound and MIDI as exclusive
+                # listening modes. OSC remains available as a parallel control
+                # stream in either mode.
+                if mapping["protocol"] == "midi" and frame.get("outputMode") == "web":
                     continue
                 raw_value = self._source_value(frame, mapping["source"], region_entered)
                 if raw_value is None:
@@ -318,6 +337,39 @@ class ExternalOutputManager:
                     self._last_sent[mapping["id"]] = (value, now)
                 except Exception as exc:
                     self._record("error", mapping["protocol"], mapping["target"], None, str(exc))
+
+    def _send_performance_events(self, frame: dict[str, Any], region_id: str | None, region_entered: bool) -> None:
+        voices = _nested(frame, "music.activeVoices")
+        if not isinstance(voices, list):
+            return
+        active_ids: set[str] = set()
+        for voice in voices:
+            if not isinstance(voice, dict):
+                continue
+            voice_region = str(voice.get("regionId") or region_id or "voice")
+            active_ids.add(voice_region)
+            event_id = str(voice.get("eventId") or "")
+            notes = voice.get("notes")
+            if not isinstance(notes, list):
+                notes = [voice.get("note")] if region_entered and voice.get("note") is not None else []
+            if event_id and self._last_voice_events.get(voice_region) == event_id:
+                continue
+            if event_id:
+                self._last_voice_events[voice_region] = event_id
+            velocity = _clamp(_number(voice.get("velocity"), 96), 1, 127)
+            channel = int(_clamp(_number(voice.get("channel"), 1), 1, 16))
+            bpm = max(20, _number(_nested(frame, "music.bpm"), 72))
+            duration = max(.04, _number(voice.get("durationBeats"), .25) * 60 / bpm)
+            # Extended open voicings can contain a triad plus 7th, 9th, 11th
+            # or 13th. Preserve the same chord that Web Audio receives.
+            for raw_note in notes[:8]:
+                note = int(_clamp(_number(raw_note, 60), 0, 127))
+                self._send_midi(
+                    {"message": "note", "target": str(note), "channel": channel, "duration": duration},
+                    velocity,
+                )
+        for inactive in set(self._last_voice_events) - active_ids:
+            self._last_voice_events.pop(inactive, None)
 
     def _ensure_osc(self) -> Any:
         target = (self.config["osc"]["host"], self.config["osc"]["port"])
@@ -376,7 +428,13 @@ class ExternalOutputManager:
         data = int(round(_clamp(value, 0, 127)))
         target = int(mapping["target"])
         if mapping["message"] == "note":
-            message = {"type": "note", "note": target, "value": max(1, data), "channel": channel}
+            message = {
+                "type": "note",
+                "note": target,
+                "value": max(1, data),
+                "channel": channel,
+                "duration": max(.04, min(12, _number(mapping.get("duration"), .12))),
+            }
         else:
             message = {"type": "cc", "control": target, "value": data, "channel": channel}
         if worker.stdin is None:
