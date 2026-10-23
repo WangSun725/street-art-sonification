@@ -38,6 +38,7 @@ const scanReadout = $("#scanReadout");
 const scanDuration = $("#scanDuration");
 const pointerMode = $("#pointerMode");
 const scanMode = $("#scanMode");
+const interactionModeSwitch = $("#interactionModeSwitch");
 const pointerControls = $("#pointerControls");
 const scanControls = $("#scanControls");
 const pointerFullscreen = $("#pointerFullscreen");
@@ -278,7 +279,18 @@ const state = {
     startedAt: 0,
     running: false,
   },
-  pointer: { x: 0, y: 0, nx: 0, ny: 0, speed: 0, lastTime: 0, source: "mouse" },
+  pointer: {
+    x: 0,
+    y: 0,
+    nx: 0,
+    ny: 0,
+    speed: 0,
+    lastTime: 0,
+    source: "mouse",
+    regions: [],
+    regionMix: new Map(),
+    lastMixAt: 0,
+  },
   eye: {
     active: false,
     starting: false,
@@ -318,6 +330,9 @@ const state = {
     lastFrameAt: 0,
     animationFrame: 0,
     regions: [],
+    manualRegionId: null,
+    regionMix: new Map(),
+    lastMixAt: 0,
   },
 };
 
@@ -699,10 +714,19 @@ function activeMusicVoices(scanning, region, scanRegions, pointerVisual = null) 
       intensity: item.intensity ?? 1,
       visual: item,
     }))
-    : (region ? [{ region, x: state.pointer.nx, y: state.pointer.ny, intensity: 1, visual: pointerVisual }] : []);
+    : (state.pointer.regions.length
+      ? state.pointer.regions.map((item) => ({
+        region: item.region,
+        x: item.x,
+        y: item.y,
+        intensity: item.intensity,
+        visual: item.visual,
+      }))
+      : (region ? [{ region, x: state.pointer.nx, y: state.pointer.ny, intensity: 1, visual: pointerVisual }] : []));
   const beatPosition = musicBeatPosition(scanning);
   return entries.map((entry) => ({
     regionId: entry.region.id,
+    mix: Number(Math.max(0, Math.min(1, entry.intensity)).toFixed(4)),
     instrument: entry.region.instrument?.label || "Lead Synth",
     instrumentId: entry.region.instrument?.id || "lead_synth",
     slot: entry.region.instrument?.slot || 1,
@@ -714,7 +738,8 @@ function activeMusicVoices(scanning, region, scanRegions, pointerVisual = null) 
       beatPosition,
       scanning ? entry.intensity : state.pointer.speed,
       entry.intensity,
-      !scanning && performance.now() - state.enteredAt < 90,
+      (!scanning && performance.now() - state.enteredAt < 90)
+        || (scanning && !state.scan.playing && state.scan.manualRegionId === entry.region.id),
       entry.visual || null,
     ),
   }));
@@ -1296,11 +1321,31 @@ function renderRegionList() {
     button.className = "region-chip";
     button.style.setProperty("--chip-color", rgb(region));
     button.dataset.region = region.id;
+    button.setAttribute("aria-pressed", "false");
     button.innerHTML = `<i></i><span><strong>${region.label}</strong><small>${region.instrument?.label || "Lead Synth"} · CH ${region.instrument?.midiChannel || 1}</small></span>`;
     button.title = region.instrument?.behavior || "Beat-synced melody";
-    button.addEventListener("click", () => {
-      if (state.mode === "scan") setInteractionMode("pointer");
-      activateRegion(region, true);
+    button.addEventListener("click", async () => {
+      if (state.mode === "scan" && state.scan.playing) {
+        showToast("Pause the scan to audition an individual region");
+        return;
+      }
+      await ensurePerformanceOutput();
+      const togglingOff = state.activeRegion?.id === region.id;
+      if (state.mode === "scan") {
+        state.scan.manualRegionId = togglingOff ? null : region.id;
+        state.scan.regions = togglingOff ? [] : [manualScanItem(region)];
+        if (togglingOff) clearActiveRegion(false);
+        else activateRegion(region, false, false);
+        if (togglingOff) soundEngine.stopScan();
+        publishOutput(true);
+        return;
+      }
+      if (togglingOff) {
+        clearActiveRegion();
+        publishOutput(true);
+      } else {
+        activateRegion(region, true);
+      }
     });
     regionList.append(button);
   }
@@ -1308,6 +1353,7 @@ function renderRegionList() {
 
 async function loadAnalysis(manifest) {
   resetScan(false);
+  resetPointerCrossfade();
   soundEngine.clearRegionVoices();
   state.manifest = manifest;
   state.activeRegion = null;
@@ -1443,6 +1489,123 @@ function scanRegionsAt(nx) {
     .sort((a, b) => b.score - a.score || b.texture - a.texture);
 }
 
+function resetScanCrossfade() {
+  state.scan.regionMix.clear();
+  state.scan.lastMixAt = 0;
+}
+
+function resetPointerCrossfade() {
+  state.pointer.regionMix.clear();
+  state.pointer.regions = [];
+  state.pointer.lastMixAt = 0;
+}
+
+function advancePointerCrossfade() {
+  if (state.mode !== "pointer") return false;
+  const now = performance.now();
+  const elapsed = state.pointer.lastMixAt ? (now - state.pointer.lastMixAt) / 1000 : 1 / 30;
+  const delta = Math.max(1 / 120, Math.min(.12, elapsed));
+  state.pointer.lastMixAt = now;
+  const region = state.activeRegion;
+  const target = region ? {
+    region,
+    x: state.pointer.nx,
+    y: state.pointer.ny,
+    intensity: 1,
+    visual: sampleVisualAt(state.pointer.nx, state.pointer.ny) || fallbackRegionVisual(region),
+  } : null;
+  const regionIds = new Set([...state.pointer.regionMix.keys(), ...(target ? [target.region.id] : [])]);
+  const mixed = [];
+  let changing = false;
+
+  for (const regionId of regionIds) {
+    const previous = state.pointer.regionMix.get(regionId);
+    const isTarget = target?.region.id === regionId;
+    const targetLevel = isTarget ? 1 : 0;
+    const currentLevel = previous?.intensity || 0;
+    const fadeSeconds = targetLevel > currentLevel ? .18 : .42;
+    const difference = targetLevel - currentLevel;
+    const step = Math.min(Math.abs(difference), delta / fadeSeconds);
+    const intensity = currentLevel + Math.sign(difference) * step;
+    const item = isTarget ? target : previous?.item;
+    if (!item || (intensity <= .001 && !isTarget)) {
+      state.pointer.regionMix.delete(regionId);
+      continue;
+    }
+    const mixedItem = { ...item, intensity, crossfade: isTarget ? "in" : "out" };
+    state.pointer.regionMix.set(regionId, { intensity, item: mixedItem });
+    mixed.push(mixedItem);
+    if (Math.abs(targetLevel - intensity) > .001) changing = true;
+  }
+  state.pointer.regions = mixed.sort((a, b) => b.intensity - a.intensity);
+  return changing;
+}
+
+function crossfadedScanRegionsAt(nx) {
+  const now = performance.now();
+  const elapsed = state.scan.lastMixAt ? (now - state.scan.lastMixAt) / 1000 : 1 / 30;
+  const delta = Math.max(1 / 120, Math.min(.12, elapsed));
+  state.scan.lastMixAt = now;
+  const rawRegions = scanRegionsAt(nx).slice(0, 5);
+  const targets = new Map(rawRegions.map((item) => [item.region.id, item]));
+  const regionIds = new Set([...state.scan.regionMix.keys(), ...targets.keys()]);
+  const mixed = [];
+
+  for (const regionId of regionIds) {
+    const target = targets.get(regionId);
+    const previous = state.scan.regionMix.get(regionId);
+    const targetLevel = target?.intensity || 0;
+    const currentLevel = previous?.intensity || 0;
+    const fadeSeconds = targetLevel > currentLevel ? .18 : .42;
+    const difference = targetLevel - currentLevel;
+    const step = Math.min(Math.abs(difference), delta / fadeSeconds);
+    const intensity = currentLevel + Math.sign(difference) * step;
+    const item = target || previous?.item;
+    if (!item || (intensity < .008 && !target)) {
+      state.scan.regionMix.delete(regionId);
+      continue;
+    }
+    const mixedItem = {
+      ...item,
+      intensity,
+      score: intensity + ((item.score || 0) - (item.intensity || 0)),
+      crossfade: target ? "in" : "out",
+    };
+    state.scan.regionMix.set(regionId, { intensity, item: mixedItem });
+    mixed.push(mixedItem);
+  }
+  return mixed.sort((a, b) => b.score - a.score || b.texture - a.texture).slice(0, 5);
+}
+
+function manualScanItem(region) {
+  const sample = scanProfileAt(region, state.scan.position);
+  const fallback = fallbackRegionVisual(region);
+  return {
+    region,
+    ...sample,
+    coverage: Math.max(sample.coverage, Number(region.area_ratio || .08)),
+    centroidY: Number.isFinite(sample.centroidY) ? sample.centroidY : .5,
+    brightness: sample.coverage ? sample.brightness : fallback.brightness,
+    saturation: sample.coverage ? sample.saturation : fallback.saturation,
+    hue: sample.coverage ? sample.hue : fallback.hue,
+    texture: sample.coverage ? sample.texture : fallback.texture,
+    colorRgb: sample.coverage ? sample.colorRgb : (region.color_rgb || [128, 128, 128]),
+    intensity: 1,
+    score: 1,
+  };
+}
+
+function syncRegionButtons() {
+  const activeIds = state.mode === "scan" && state.scan.playing
+    ? new Set(state.scan.regions.filter((item) => item.intensity > .06).slice(0, 5).map((item) => item.region.id))
+    : new Set(state.activeRegion ? [state.activeRegion.id] : []);
+  document.querySelectorAll(".region-chip").forEach((chip) => {
+    const active = activeIds.has(chip.dataset.region);
+    chip.classList.toggle("active", active);
+    chip.setAttribute("aria-pressed", String(active));
+  });
+}
+
 function activateRegion(region, fromList = false, triggerSound = true) {
   const changed = state.activeRegion?.id !== region?.id;
   state.activeRegion = region;
@@ -1453,7 +1616,8 @@ function activateRegion(region, fromList = false, triggerSound = true) {
       if (navigator.vibrate) navigator.vibrate(9);
     }
   }
-  document.querySelectorAll(".region-chip").forEach((chip) => chip.classList.toggle("active", chip.dataset.region === region?.id));
+  if (state.mode === "pointer") advancePointerCrossfade();
+  syncRegionButtons();
   if (region) {
     regionBadge.hidden = false;
     regionBadge.style.setProperty("--region-color", rgb(region));
@@ -1471,7 +1635,8 @@ function clearActiveRegion(stopSound = true) {
   regionBadge.hidden = true;
   const direction = state.pointer.source === "gaze" ? "Look across the artwork" : "Move over the artwork";
   $("#currentRegion").textContent = state.regions.length ? direction : "Waiting for analysis";
-  document.querySelectorAll(".region-chip").forEach((chip) => chip.classList.remove("active"));
+  syncRegionButtons();
+  if (state.mode === "pointer") advancePointerCrossfade();
   if (stopSound) soundEngine.leave();
   drawCanvas();
 }
@@ -1632,6 +1797,7 @@ class SoundEngine {
     this.delay = null;
     this.delayFeedback = null;
     this.regionVoices = new Map();
+    this.regionMixBuses = new Map();
     this.noiseBuffer = null;
     this.colorStates = new Map();
     this.activeColorRegions = new Set();
@@ -1772,8 +1938,6 @@ class SoundEngine {
   }
   enter(region, nx, ny) {
     if (!this.enabled || !region) return;
-    const now = this.context.currentTime;
-    for (const existing of this.regionVoices.values()) existing.gain.gain.setTargetAtTime(0, now, .06);
     this.lastPointerEventId = null;
     this.lastVoiceEvents.delete(region.id);
     this.lastRegion = region.id;
@@ -1781,20 +1945,36 @@ class SoundEngine {
   leave() {
     if (!this.context) return;
     this.gain.gain.setTargetAtTime(0, this.context.currentTime, .08);
-    for (const voice of this.regionVoices.values()) voice.gain.gain.setTargetAtTime(0, this.context.currentTime, .1);
     this.lastPointerEventId = null;
-    this.lastVoiceEvents.clear();
   }
   update(payload) {
-    if (!this.enabled || !payload.region) return;
-    const region = state.activeRegion;
+    if (!this.enabled) return;
     const now = this.context.currentTime;
-    for (const existing of this.regionVoices.values()) existing.gain.gain.setTargetAtTime(0, now, .06);
+    const activeIds = new Set();
+    for (const item of state.pointer.regions) {
+      activeIds.add(item.region.id);
+      const bus = this.ensureRegionMixBus(item.region);
+      bus.gain.setTargetAtTime(Math.max(0, Math.min(1, item.intensity)), now, .025);
+    }
+    for (const [id, bus] of this.regionMixBuses) {
+      if (!activeIds.has(id)) bus.gain.setTargetAtTime(0, now, .08);
+    }
     this.playSharedEvents(payload.music?.activeVoices || [], payload.normalized.x, payload.speed);
+    if (!payload.region) return;
+    const region = state.activeRegion;
     if (payload.edgeProximity > .56 && performance.now() - this.lastTick > 110 - payload.edgeProximity * 55) {
       const frequency = this.frequency(region, payload.normalized.x, payload.normalized.y);
       const edgeType = region.instrument?.id === "percussion_texture" ? "square" : "triangle";
-      this.pulse(frequency * 2, .022, .017, edgeType, 0, payload.normalized.x * 1.6 - .8);
+      this.pulse(
+        frequency * 2,
+        .022,
+        .017,
+        edgeType,
+        0,
+        payload.normalized.x * 1.6 - .8,
+        0,
+        this.ensureRegionMixBus(region),
+      );
       this.lastTick = performance.now();
     }
   }
@@ -1814,6 +1994,7 @@ class SoundEngine {
   }
   playPatternEvent(region, event, nx, speed) {
     const role = region.instrument?.id || "lead_synth";
+    const destination = this.ensureRegionMixBus(region);
     const pan = Math.max(-.82, Math.min(.82, nx * 1.64 - .82));
     const duration = Math.max(.045, event.durationBeats * this.beatSeconds());
     const velocity = Math.max(.35, Math.min(1, event.velocity / 127));
@@ -1824,10 +2005,10 @@ class SoundEngine {
     const frequencies = event.notes.map((note) => 440 * Math.pow(2, (note - 69) / 12));
     if (role === "drums") {
       for (const note of event.notes) {
-        if (!this.playSample("drums", note, duration, .34 * velocity, 0, pan)) {
-          if (note === 36) this.pulse(54, duration * 1.5, .065 * velocity, "sine", 0, pan, 330);
-          else if (note === 38) this.noiseBurst(duration * 1.3, .035 * velocity, 1900, 0, pan, event.patternStep + 3);
-          else this.noiseBurst(duration * .62, .018 * velocity, 6900, 0, pan, event.patternStep + 8);
+        if (!this.playSample("drums", note, duration, .34 * velocity, 0, pan, 10000, destination)) {
+          if (note === 36) this.pulse(54, duration * 1.5, .065 * velocity, "sine", 0, pan, 330, destination);
+          else if (note === 38) this.noiseBurst(duration * 1.3, .035 * velocity, 1900, 0, pan, event.patternStep + 3, destination);
+          else this.noiseBurst(duration * .62, .018 * velocity, 6900, 0, pan, event.patternStep + 8, destination);
         }
       }
       return;
@@ -1835,8 +2016,8 @@ class SoundEngine {
     if (role === "percussion_texture") {
       const cutoff = visualCutoff + Math.min(1, speed) * 2400;
       for (const note of event.notes) {
-        if (!this.playSample("drums", note, duration, (.18 + Math.min(1, speed) * .2) * velocity, 0, pan, cutoff)) {
-          this.noiseBurst(duration, (.018 + Math.min(1, speed) * .025) * velocity, cutoff, 0, pan, event.patternStep + region.index);
+        if (!this.playSample("drums", note, duration, (.18 + Math.min(1, speed) * .2) * velocity, 0, pan, cutoff, destination)) {
+          this.noiseBurst(duration, (.018 + Math.min(1, speed) * .025) * velocity, cutoff, 0, pan, event.patternStep + region.index, destination);
         }
       }
       return;
@@ -1868,6 +2049,7 @@ class SoundEngine {
         0,
         Math.max(-.9, Math.min(.9, pan + (index - (frequencies.length - 1) / 2) * .09)),
         event.timbre ? visualCutoff : patch.cutoff + (1 - state.pointer.ny) * 1200,
+        destination,
       )) return;
       this.envelopeTone(
         frequency,
@@ -1880,10 +2062,11 @@ class SoundEngine {
         event.timbre ? visualCutoff : patch.cutoff + (1 - state.pointer.ny) * 1200,
         patch.attack,
         patch.release,
+        destination,
       );
     });
   }
-  playSample(instrument, note, duration, volume, delay = 0, pan = 0, cutoff = 10000) {
+  playSample(instrument, note, duration, volume, delay = 0, pan = 0, cutoff = 10000, destination = null) {
     if (!this.enabled || !this.context || !this.samplesReady) return false;
     const sample = instrument === "drums"
       ? this.sampleBank.exact(instrument, note)
@@ -1910,7 +2093,7 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(Math.max(.0002, volume), start + .008);
     gain.gain.setValueAtTime(Math.max(.0002, volume * .9), Math.max(start + .008, start + audibleDuration - release));
     gain.gain.exponentialRampToValueAtTime(.0001, start + audibleDuration);
-    source.connect(filter).connect(gain).connect(panner).connect(this.musicBus);
+    source.connect(filter).connect(gain).connect(panner).connect(destination || this.musicBus);
     source.start(start);
     source.stop(start + audibleDuration + .025);
     return true;
@@ -1990,15 +2173,31 @@ class SoundEngine {
     this.regionVoices.set(region.id, voice);
     return voice;
   }
+  ensureRegionMixBus(region) {
+    if (this.regionMixBuses.has(region.id)) return this.regionMixBuses.get(region.id);
+    const gain = this.context.createGain();
+    gain.gain.value = 0;
+    gain.connect(this.musicBus);
+    this.regionMixBuses.set(region.id, gain);
+    return gain;
+  }
   updateScan(regions, nx, seconds, playing = true, events = []) {
     if (!this.enabled || !this.context) return;
     const now = this.context.currentTime;
     this.gain.gain.setTargetAtTime(0, now, .05);
+    const activeIds = new Set();
+    for (const item of regions) {
+      activeIds.add(item.region.id);
+      const bus = this.ensureRegionMixBus(item.region);
+      bus.gain.setTargetAtTime(Math.max(0, Math.min(1, item.intensity)), now, .035);
+    }
+    for (const [id, bus] of this.regionMixBuses) {
+      if (!activeIds.has(id)) bus.gain.setTargetAtTime(0, now, .1);
+    }
     // The browser renderer receives the exact activeVoices event list placed
     // in the WebSocket frame. MIDI Out consumes that same list server-side,
     // so pitches, chords, note lengths and rhythmic steps stay identical.
     this.playSharedEvents(events, nx, state.scan.playing ? 1 / Math.max(1, state.scan.duration) : 0);
-    const activeIds = new Set();
     for (const [id, voice] of this.regionVoices) {
       if (!activeIds.has(id)) voice.gain.gain.setTargetAtTime(0, now, .2);
     }
@@ -2091,7 +2290,7 @@ class SoundEngine {
         this.noiseBurst(beat * (.055 + texture * .08), level * .45, cutoff * .7, gridDelay + stagger + beat * .25, pan, seconds + region.index);
     }
   }
-  noiseBurst(duration, volume, cutoff, delay = 0, pan = 0, offsetSeed = 0) {
+  noiseBurst(duration, volume, cutoff, delay = 0, pan = 0, offsetSeed = 0, destination = null) {
     if (!this.enabled || !this.context || !this.noiseBuffer) return;
     const now = this.context.currentTime + delay;
     const source = this.context.createBufferSource();
@@ -2105,7 +2304,7 @@ class SoundEngine {
     panner.pan.value = pan;
     gain.gain.setValueAtTime(volume, now);
     gain.gain.exponentialRampToValueAtTime(.0001, now + duration);
-    source.connect(filter).connect(gain).connect(panner).connect(this.musicBus);
+    source.connect(filter).connect(gain).connect(panner).connect(destination || this.musicBus);
     const offset = Math.abs(Math.sin(offsetSeed * 12.9898)) * 1.5;
     source.start(now, offset, duration + .02);
   }
@@ -2113,6 +2312,7 @@ class SoundEngine {
     if (!this.context) return;
     const now = this.context.currentTime;
     for (const voice of this.regionVoices.values()) voice.gain.gain.setTargetAtTime(0, now, .12);
+    for (const bus of this.regionMixBuses.values()) bus.gain.setTargetAtTime(0, now, .12);
   }
   resetScanEvents() {
     this.colorStates.clear();
@@ -2126,11 +2326,13 @@ class SoundEngine {
       }
     }
     this.regionVoices.clear();
+    for (const bus of this.regionMixBuses.values()) bus.disconnect();
+    this.regionMixBuses.clear();
     this.lastPointerEventId = null;
     this.lastVoiceEvents.clear();
     this.resetScanEvents();
   }
-  envelopeTone(frequency, duration, volume, type = "sine", companionType = null, delay = 0, pan = 0, cutoff = 0, attack = .01, release = .14) {
+  envelopeTone(frequency, duration, volume, type = "sine", companionType = null, delay = 0, pan = 0, cutoff = 0, attack = .01, release = .14, destination = null) {
     if (!this.enabled || !this.context) return;
     const oscillator = this.context.createOscillator();
     const companion = companionType ? this.context.createOscillator() : null;
@@ -2158,7 +2360,7 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(.0001, end);
     oscillator.connect(filter);
     if (companion) companion.connect(companionGain).connect(filter);
-    filter.connect(gain).connect(panner).connect(this.musicBus);
+    filter.connect(gain).connect(panner).connect(destination || this.musicBus);
     oscillator.start(start);
     oscillator.stop(end + .03);
     if (companion) {
@@ -2166,7 +2368,7 @@ class SoundEngine {
       companion.stop(end + .03);
     }
   }
-  pulse(frequency, duration, volume, type = "sine", delay = 0, pan = 0, cutoff = 0) {
+  pulse(frequency, duration, volume, type = "sine", delay = 0, pan = 0, cutoff = 0, destination = null) {
     if (!this.enabled || !this.context) return;
     const oscillator = this.context.createOscillator();
     const gain = this.context.createGain();
@@ -2185,7 +2387,7 @@ class SoundEngine {
     } else {
       oscillator.connect(gain);
     }
-    gain.connect(panner).connect(this.musicBus);
+    gain.connect(panner).connect(destination || this.musicBus);
     oscillator.start(start);
     oscillator.stop(start + duration + .02);
   }
@@ -2247,7 +2449,14 @@ function updateScanControls() {
 function setScanPosition(seconds, forcePublish = false) {
   state.scan.seconds = Math.max(0, Math.min(state.scan.duration, Number(seconds) || 0));
   state.scan.position = state.scan.seconds / state.scan.duration;
-  state.scan.regions = scanRegionsAt(state.scan.position);
+  if (state.scan.playing) {
+    state.scan.regions = crossfadedScanRegionsAt(state.scan.position);
+  } else if (state.scan.manualRegionId) {
+    const manualRegion = state.regions.find((region) => region.id === state.scan.manualRegionId);
+    state.scan.regions = manualRegion ? [manualScanItem(manualRegion)] : [];
+  } else {
+    state.scan.regions = [];
+  }
   const primary = state.scan.regions[0]?.region || null;
   if (primary) activateRegion(primary, false, false);
   else clearActiveRegion(false);
@@ -2289,6 +2498,8 @@ async function playScan() {
     soundEngine.resetScanEvents();
   }
   state.scan.engaged = true;
+  state.scan.manualRegionId = null;
+  resetScanCrossfade();
   state.scan.playing = true;
   state.scan.startedAt = performance.now();
   state.scan.startedFrom = state.scan.seconds;
@@ -2302,8 +2513,12 @@ async function playScan() {
 
 function pauseScan() {
   state.scan.playing = false;
+  state.scan.manualRegionId = null;
+  state.scan.regions = [];
   cancelAnimationFrame(state.scan.animationFrame);
   soundEngine.stopScan();
+  resetScanCrossfade();
+  clearActiveRegion(false);
   updateScanControls();
   publishOutput(true);
 }
@@ -2314,9 +2529,11 @@ function resetScan(showMessage = true) {
   state.scan.position = 0;
   state.scan.seconds = 0;
   state.scan.regions = [];
+  state.scan.manualRegionId = null;
   cancelAnimationFrame(state.scan.animationFrame);
   soundEngine.stopScan();
   soundEngine.resetScanEvents();
+  resetScanCrossfade();
   scanTimeline.value = "0";
   scanTimeline.style.setProperty("--scan-fill", "0%");
   scanTime.textContent = `00:00 / ${formatTime(state.scan.duration)}`;
@@ -2334,6 +2551,7 @@ function setInteractionMode(mode) {
     pauseScan();
     state.scan.engaged = false;
     state.mode = "pointer";
+    resetPointerCrossfade();
     clearActiveRegion();
     if (state.outputMode === "midi" || soundEngine.enabled) startPointerMusicTimeline();
     statusText.textContent = state.pointer.source === "gaze"
@@ -2343,8 +2561,10 @@ function setInteractionMode(mode) {
     pausePointerMusicTimeline();
     state.mode = "scan";
     state.scan.engaged = true;
+    state.scan.manualRegionId = null;
     state.pointer.source = "mouse";
     clearActiveRegion();
+    resetPointerCrossfade();
     setScanPosition(state.scan.seconds, true);
     statusText.textContent = `Set a duration, then start the ${formatTime(state.scan.duration)} scan.`;
   }
@@ -2363,6 +2583,9 @@ function setInteractionMode(mode) {
   $("#signalLabel").textContent = mode === "pointer"
     ? `ACTIVE REGION · ${state.pointer.source.toUpperCase()}`
     : "ACTIVE REGION · SCAN";
+  interactionModeSwitch.querySelector("span").textContent = mode === "pointer" ? "Left-to-Right" : "Mouse / Eye";
+  interactionModeSwitch.title = mode === "pointer" ? "Switch to Left-to-Right Scan" : "Switch to Mouse / Eye Tracking";
+  interactionModeSwitch.setAttribute("aria-label", interactionModeSwitch.title);
   updateScanControls();
   drawCanvas();
   publishOutput(true);
@@ -2402,6 +2625,11 @@ scanMode.addEventListener("click", (event) => {
   setSetupVisible(false);
   showToast("Left-to-Right mode ready");
 });
+interactionModeSwitch.addEventListener("click", () => {
+  const nextMode = state.mode === "pointer" ? "scan" : "pointer";
+  setInteractionMode(nextMode);
+  showToast(nextMode === "pointer" ? "Mouse / Eye Tracking mode ready" : "Left-to-Right mode ready");
+});
 
 function pointerPosition(event) {
   const rect = canvas.getBoundingClientRect();
@@ -2426,6 +2654,7 @@ function updateExplorePosition(nx, ny, source) {
   const region = source === "gaze" ? regionAtGaze(nx, ny) : regionAt(nx, ny);
   if (source === "gaze") updateGazeRegion(region, now);
   else if (region?.id !== state.activeRegion?.id) region ? activateRegion(region) : clearActiveRegion();
+  advancePointerCrossfade();
   publishOutput();
 }
 
@@ -2858,7 +3087,33 @@ function updateSessionSummary() {
   const statement = $("#statement").value.trim();
   $("#currentArtName").textContent = state.selectedFile ? safeName(state.selectedFile.name) : "Untitled artwork";
   $("#currentStatement").textContent = statement || "No artist statement";
-  $("#currentStatement").title = statement || "No artist statement";
+}
+
+function setupCollapsibleSections() {
+  document.querySelectorAll("[data-collapsible]").forEach((section, index) => {
+    const heading = section.querySelector(":scope > .collapsible-heading");
+    const actions = heading?.querySelector(".section-heading-actions");
+    const content = section.querySelector(":scope > .collapsible-content");
+    if (!heading || !actions || !content) return;
+    const title = heading.querySelector("h2, strong, label")?.textContent?.trim() || `Section ${index + 1}`;
+    const contentId = content.id || `panel-section-${index + 1}`;
+    content.id = contentId;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "section-collapse-toggle";
+    button.setAttribute("aria-expanded", "true");
+    button.setAttribute("aria-controls", contentId);
+    button.setAttribute("aria-label", `Collapse ${title}`);
+    button.title = `Collapse ${title}`;
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
+    button.addEventListener("click", () => {
+      const collapsed = section.classList.toggle("section-collapsed");
+      button.setAttribute("aria-expanded", String(!collapsed));
+      button.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} ${title}`);
+      button.title = button.getAttribute("aria-label");
+    });
+    actions.append(button);
+  });
 }
 
 function updateAnalysisSteps(progress) {
@@ -3257,6 +3512,7 @@ async function startOver() {
   state.image = null;
   state.imagePixels = null;
   resetPointerMusicTimeline();
+  resetPointerCrossfade();
   state.manifest = null;
   state.regions = [];
   state.activeRegion = null;
@@ -3282,6 +3538,7 @@ $("#newArtwork").addEventListener("click", startOver);
 $("#modeStartOver").addEventListener("click", startOver);
 
 window.addEventListener("resize", drawCanvas);
+setupCollapsibleSections();
 restoreMusicSettings();
 connectSocket();
 setSetupVisible(true);
@@ -3294,7 +3551,9 @@ loadExternalOutput().then(() => setOutputMode("midi", { announce: false }));
 // Keep beat-based pointer and gaze patterns running even when the pointer is
 // held still. The same frames drive Web Audio, MIDI, OSC, and the live JSON.
 window.setInterval(() => {
-  if (!state.setupComplete || state.mode !== "pointer" || !state.activeRegion || state.analyzing) return;
+  if (!state.setupComplete || state.mode !== "pointer" || state.analyzing) return;
+  if (!state.activeRegion && !state.pointer.regions.length) return;
   if (performance.now() - state.pointer.lastTime > 70) state.pointer.speed *= .82;
+  advancePointerCrossfade();
   publishOutput(true);
 }, 50);

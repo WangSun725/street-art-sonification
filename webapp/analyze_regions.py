@@ -128,8 +128,20 @@ def choose_artwork_crop(
         margins[1] >= (content_rect[3] - content_rect[1]) * 0.035,
         margins[3] >= (content_rect[3] - content_rect[1]) * 0.035,
     ))
+    model_full_frame = bool(artwork.get("full_frame", True))
+    # Vision models occasionally return a useful, high-confidence artwork box
+    # while also setting ``full_frame`` to true.  When the box itself leaves a
+    # substantial amount of scenery outside it on at least three sides, the
+    # geometry is stronger evidence than that contradictory flag.  The strict
+    # confidence and margin requirements keep genuine full-frame murals safe.
+    full_frame_overridden = (
+        model_full_frame
+        and confidence >= 0.90
+        and 0.06 <= area_ratio <= 0.78
+        and meaningful_margins >= 3
+    )
     should_crop = (
-        not bool(artwork.get("full_frame", True))
+        (not model_full_frame or full_frame_overridden)
         and confidence >= 0.82
         and 0.06 <= area_ratio <= 0.82
         and meaningful_margins >= 2
@@ -153,7 +165,8 @@ def choose_artwork_crop(
         return content_rect, {
             "applied": False,
             "reason": "full_frame_uncertain_or_region_disagreement",
-            "model_full_frame": bool(artwork.get("full_frame", True)),
+            "model_full_frame": model_full_frame,
+            "full_frame_overridden": full_frame_overridden,
             "model_confidence": round(confidence, 4),
             "model_box": proposed,
         }
@@ -200,14 +213,16 @@ def choose_artwork_crop(
         return content_rect, {
             "applied": False,
             "reason": "crop_too_close_to_full_frame",
-            "model_full_frame": False,
+            "model_full_frame": model_full_frame,
+            "full_frame_overridden": full_frame_overridden,
             "model_confidence": round(confidence, 4),
             "model_box": proposed,
         }
     return crop, {
         "applied": True,
-        "reason": "clear_external_background",
-        "model_full_frame": False,
+        "reason": "high_confidence_box_overrode_full_frame" if full_frame_overridden else "clear_external_background",
+        "model_full_frame": model_full_frame,
+        "full_frame_overridden": full_frame_overridden,
         "model_confidence": round(confidence, 4),
         "model_box": proposed,
         "sam_box": best_bounds,

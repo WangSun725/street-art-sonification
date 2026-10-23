@@ -125,7 +125,8 @@ body.fullscreen-fallback-active { overflow: hidden; }
 .output-mode-switch button:hover { border-color: rgba(38,37,32,.48); color: var(--ink); }
 .output-mode-switch button.active { border-color: var(--ink); background: var(--ink); color: #fff8e9; box-shadow: 3px 3px 0 rgba(216,92,69,.22); }
 .output-mode-switch button[data-output-mode="midi"].active { box-shadow: 3px 3px 0 rgba(80,106,163,.25); }
-.workspace.midi-output .volume-section { opacity: .42; pointer-events: none; }
+.workspace.midi-output .volume-section { opacity: .42; }
+.workspace.midi-output .volume-section .collapsible-content { pointer-events: none; }
 .workspace.midi-output #soundToggle { opacity: .42; pointer-events: none; }
 .volume-section { padding: 15px 22px 14px; border-bottom: 1px solid var(--line); background: #f7f7f4; }
 .volume-label, .volume-scale { display: flex; align-items: center; justify-content: space-between; }
@@ -734,6 +735,12 @@ button { letter-spacing: .015em; }
   background: rgba(214,170,62,.12);
   box-shadow: 2px 3px 0 rgba(80,106,163,.12);
 }
+.region-chip.active {
+  transform: translateY(2px) rotate(0deg);
+  border-color: var(--ink);
+  background: rgba(214,170,62,.23);
+  box-shadow: inset 2px 2px 0 rgba(38,37,32,.10);
+}
 .region-chip strong { font-family: var(--marker); font-weight: 500; font-size: .72rem; }
 .region-chip i { width: 4px; border-radius: 55% 45% 62% 38%; }
 
@@ -1006,9 +1013,37 @@ body.setup-active { overflow: hidden; }
 .setup-progress { inset: 24px; border: 0; border-radius: 11px; background: rgba(242,236,226,.985); }
 .session-artwork { min-height: 49px; padding: 6px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 9px; border: 1.5px solid rgba(38,37,32,.26); border-radius: 7px 4px 9px 5px; background: rgba(255,251,241,.67); }
 .session-artwork .thumbnail { width: 42px; height: 42px; }
-.session-artwork strong, .session-artwork small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-copy { min-width: 0; }
+.session-artwork strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-artwork strong { font-family: var(--marker); font-size: .72rem; font-weight: 500; }
-.session-artwork small { margin-top: 3px; color: var(--muted); font-size: .56rem; }
+.statement-disclosure { margin-top: 4px; color: var(--muted); font-size: .56rem; }
+.statement-disclosure summary { display: flex; align-items: center; gap: 5px; width: max-content; max-width: 100%; list-style: none; cursor: pointer; }
+.statement-disclosure summary::-webkit-details-marker { display: none; }
+.statement-disclosure summary::after { content: "⌄"; font-size: .7rem; line-height: 1; transition: transform .16s ease; }
+.statement-disclosure[open] summary::after { transform: rotate(180deg); }
+.statement-disclosure p { margin: 7px 0 1px; color: #565249; font-size: .62rem; line-height: 1.48; white-space: normal; }
+.section-heading-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.output-mode-heading .section-heading-actions > small { color: var(--green); font-size: .58rem; }
+.section-collapse-toggle {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  padding: 4px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid rgba(38,37,32,.32);
+  border-radius: 7px 5px 8px 6px;
+  background: rgba(255,251,241,.62);
+  color: var(--muted);
+  cursor: pointer;
+}
+.section-collapse-toggle:hover { border-color: var(--ink); color: var(--ink); }
+.section-collapse-toggle svg { width: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; transition: transform .18s ease; }
+.section-collapsed .section-collapse-toggle svg { transform: rotate(-90deg); }
+.section-collapsed > .collapsible-content { display: none; }
+.collapsible-section.section-collapsed { padding-top: 11px; padding-bottom: 11px; }
+.collapsible-section.section-collapsed > .collapsible-heading { margin-bottom: 0; }
+.mode-swap-button { border-color: var(--ink); background: rgba(214,170,62,.13); }
 .new-artwork { width: 100%; min-height: 34px; margin-top: 7px; border: 1.5px solid rgba(38,37,32,.35); border-radius: 6px 9px 5px 8px; background: transparent; color: var(--muted); font-size: .64rem; cursor: pointer; }
 .new-artwork:hover { border-color: var(--ink); background: rgba(214,170,62,.08); color: var(--ink); }
 

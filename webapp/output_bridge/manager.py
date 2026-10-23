@@ -138,6 +138,7 @@ class ExternalOutputManager:
         self._last_region: str | None = None
         self._last_output_mode: str | None = None
         self._last_voice_events: dict[str, str] = {}
+        self._last_expression: dict[int, int] = {}
         self._lock = threading.RLock()
         self.last_activity: dict[str, Any] = {
             "status": "idle",
@@ -343,11 +344,19 @@ class ExternalOutputManager:
         if not isinstance(voices, list):
             return
         active_ids: set[str] = set()
+        active_channels: set[int] = set()
         for voice in voices:
             if not isinstance(voice, dict):
                 continue
             voice_region = str(voice.get("regionId") or region_id or "voice")
             active_ids.add(voice_region)
+            channel = int(_clamp(_number(voice.get("channel"), 1), 1, 16))
+            active_channels.add(channel)
+            expression = int(round(_clamp(_number(voice.get("mix"), 1), 0, 1) * 127))
+            previous_expression = self._last_expression.get(channel)
+            if previous_expression is None or abs(expression - previous_expression) >= 2:
+                self._send_midi({"message": "cc", "target": "11", "channel": channel}, expression)
+                self._last_expression[channel] = expression
             event_id = str(voice.get("eventId") or "")
             notes = voice.get("notes")
             if not isinstance(notes, list):
@@ -357,7 +366,6 @@ class ExternalOutputManager:
             if event_id:
                 self._last_voice_events[voice_region] = event_id
             velocity = _clamp(_number(voice.get("velocity"), 96), 1, 127)
-            channel = int(_clamp(_number(voice.get("channel"), 1), 1, 16))
             bpm = max(20, _number(_nested(frame, "music.bpm"), 72))
             duration = max(.04, _number(voice.get("durationBeats"), .25) * 60 / bpm)
             # Extended open voicings can contain a triad plus 7th, 9th, 11th
@@ -370,6 +378,10 @@ class ExternalOutputManager:
                 )
         for inactive in set(self._last_voice_events) - active_ids:
             self._last_voice_events.pop(inactive, None)
+        for channel in set(self._last_expression) - active_channels:
+            if self._last_expression[channel] != 0:
+                self._send_midi({"message": "cc", "target": "11", "channel": channel}, 0)
+            self._last_expression.pop(channel, None)
 
     def _ensure_osc(self) -> Any:
         target = (self.config["osc"]["host"], self.config["osc"]["port"])
@@ -480,6 +492,7 @@ class ExternalOutputManager:
                     pass
         self._midi_port = None
         self._midi_target = None
+        self._last_expression.clear()
 
     def _close_outputs(self) -> None:
         self._close_midi()

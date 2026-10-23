@@ -7,7 +7,7 @@
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261021-timeline1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261022-mode-switch1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
@@ -86,6 +86,10 @@
           <p id="modeInstruction">Move across the image with a mouse or your eyes</p>
         </div>
         <div class="toolbar-actions">
+          <button id="interactionModeSwitch" class="icon-button mode-swap-button" type="button" title="Switch to Left-to-Right Scan">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10l-2.5-2.5M17 17H7l2.5 2.5"/><path d="m17 7-2.5 2.5M7 17l2.5-2.5"/></svg>
+            <span>Left-to-Right</span>
+          </button>
           <button id="newArtwork" class="icon-button start-over-button" type="button" title="Clear this session and return to the first screen">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7H4v-4M4.5 7.5A8 8 0 1 1 4 16"/></svg>
             <span>Start over</span>
@@ -197,75 +201,93 @@
         </div>
       </header>
 
-      <section class="output-mode-section" aria-label="Audio output mode">
-        <div class="output-mode-heading">
+      <section class="output-mode-section collapsible-section" data-collapsible aria-label="Audio output mode">
+        <div class="output-mode-heading collapsible-heading">
           <div><strong>Audio Output</strong></div>
-          <small id="outputModeStatus">MIDI Out</small>
+          <div class="section-heading-actions"><small id="outputModeStatus">MIDI Out</small></div>
         </div>
-        <div class="output-mode-switch" role="group" aria-label="Choose audio output">
-          <button type="button" data-output-mode="web" aria-pressed="false">
-            <span>WEB AUDIO</span><small>Hear sound in this page</small>
-          </button>
-          <button class="active" type="button" data-output-mode="midi" aria-pressed="true">
-            <span>MIDI OUT</span><small>Send notes and controls</small>
-          </button>
+        <div class="collapsible-content">
+          <div class="output-mode-switch" role="group" aria-label="Choose audio output">
+            <button type="button" data-output-mode="web" aria-pressed="false">
+              <span>WEB AUDIO</span><small>Hear sound in this page</small>
+            </button>
+            <button class="active" type="button" data-output-mode="midi" aria-pressed="true">
+              <span>MIDI OUT</span><small>Send notes and controls</small>
+            </button>
+          </div>
         </div>
       </section>
 
-      <section class="volume-section" aria-label="Sound output level">
-        <div class="volume-label">
+      <section class="volume-section collapsible-section" data-collapsible aria-label="Sound output level">
+        <div class="volume-label collapsible-heading">
           <label for="volumeSlider">Output volume</label>
-          <output id="volumeValue" for="volumeSlider">70%</output>
+          <div class="section-heading-actions"><output id="volumeValue" for="volumeSlider">70%</output></div>
         </div>
-        <input id="volumeSlider" type="range" min="0" max="100" value="70" step="1" aria-label="Output volume">
-        <div class="volume-scale" aria-hidden="true"><span>Quiet</span><span>Loud</span></div>
+        <div class="collapsible-content">
+          <input id="volumeSlider" type="range" min="0" max="100" value="70" step="1" aria-label="Output volume">
+          <div class="volume-scale" aria-hidden="true"><span>Quiet</span><span>Loud</span></div>
+        </div>
       </section>
 
-      <section class="music-section" aria-label="Global musical settings">
-        <div class="music-heading">
+      <section class="music-section collapsible-section" data-collapsible aria-label="Global musical settings">
+        <div class="music-heading collapsible-heading">
           <div><strong>Global System</strong></div>
-          <small id="musicSourceStatus">Real-time algorithm</small>
+          <div class="section-heading-actions"><small id="musicSourceStatus">Real-time algorithm</small></div>
         </div>
-        <div class="music-controls">
-          <label for="musicBpm"><span>BPM</span><input id="musicBpm" type="number" min="40" max="200" step="1" value="72"></label>
-          <label for="musicRoot"><span>ROOT</span><select id="musicRoot" aria-label="Musical root note">
-            <option>C</option><option>C#</option><option selected>D</option><option>D#</option><option>E</option><option>F</option>
-            <option>F#</option><option>G</option><option>G#</option><option>A</option><option>A#</option><option>B</option>
-          </select></label>
-          <label for="musicMode"><span>MODE</span><select id="musicMode" aria-label="Musical mode">
-            <option value="major">Major</option>
-            <option value="minor">Minor</option>
-            <option value="dorian" selected>Dorian</option>
-            <option value="phrygian">Phrygian</option>
-            <option value="mixolydian">Mixolydian</option>
-            <option value="minorPentatonic">Minor pentatonic</option>
-          </select></label>
+        <div class="collapsible-content">
+          <div class="music-controls">
+            <label for="musicBpm"><span>BPM</span><input id="musicBpm" type="number" min="40" max="200" step="1" value="72"></label>
+            <label for="musicRoot"><span>ROOT</span><select id="musicRoot" aria-label="Musical root note">
+              <option>C</option><option>C#</option><option selected>D</option><option>D#</option><option>E</option><option>F</option>
+              <option>F#</option><option>G</option><option>G#</option><option>A</option><option>A#</option><option>B</option>
+            </select></label>
+            <label for="musicMode"><span>MODE</span><select id="musicMode" aria-label="Musical mode">
+              <option value="major">Major</option>
+              <option value="minor">Minor</option>
+              <option value="dorian" selected>Dorian</option>
+              <option value="phrygian">Phrygian</option>
+              <option value="mixolydian">Mixolydian</option>
+              <option value="minorPentatonic">Minor pentatonic</option>
+            </select></label>
+          </div>
         </div>
       </section>
 
-      <section class="control-section session-section">
-        <div class="section-heading">
+      <section class="control-section session-section collapsible-section" data-collapsible>
+        <div class="section-heading collapsible-heading">
           <h2>Current Artwork</h2>
+          <div class="section-heading-actions"></div>
         </div>
-        <div class="session-artwork">
-          <span class="thumbnail"><img id="thumbImage" src="/assets/demo/image" alt="Current artwork thumbnail"></span>
-          <span><strong id="currentArtName">the-defiant-one.webp</strong><small id="currentStatement">No artist statement</small></span>
+        <div class="collapsible-content">
+          <div class="session-artwork">
+            <span class="thumbnail"><img id="thumbImage" src="/assets/demo/image" alt="Current artwork thumbnail"></span>
+            <span class="session-copy">
+              <strong id="currentArtName">the-defiant-one.webp</strong>
+              <details class="statement-disclosure">
+                <summary>Artist statement</summary>
+                <p id="currentStatement">No artist statement</p>
+              </details>
+            </span>
+          </div>
         </div>
       </section>
 
-      <section class="control-section regions-section">
-        <div class="section-heading inline">
+      <section class="control-section regions-section collapsible-section" data-collapsible>
+        <div class="section-heading inline collapsible-heading">
           <div><h2>Regions</h2></div>
-          <span id="regionCount" class="count-pill">9</span>
+          <div class="section-heading-actions"><span id="regionCount" class="count-pill">9</span></div>
         </div>
-        <div id="regionList" class="region-list" aria-label="Detected regions"></div>
+        <div class="collapsible-content">
+          <div id="regionList" class="region-list" aria-label="Detected regions"></div>
+        </div>
       </section>
 
-      <section class="control-section external-section" aria-label="Advanced MIDI and OSC control mapping">
-        <div class="section-heading inline">
+      <section class="control-section external-section collapsible-section" data-collapsible aria-label="Advanced MIDI and OSC control mapping">
+        <div class="section-heading inline collapsible-heading">
           <div><h2>Advanced Control Mapping</h2></div>
-          <span id="externalStatus" class="external-pill"><i></i> Off</span>
+          <div class="section-heading-actions"><span id="externalStatus" class="external-pill"><i></i> Off</span></div>
         </div>
+        <div class="collapsible-content">
         <label class="external-enable">
           <span><strong>Enable control mapping</strong><small>Optional MIDI CC and OSC parameters</small></span>
           <input id="externalEnabled" type="checkbox" role="switch" aria-label="Enable external output">
@@ -302,13 +324,15 @@
           <button id="saveExternal" class="save-external" type="button">Apply &amp; save</button>
           <small id="externalMessage" role="status">Settings are stored on this Mac.</small>
         </div>
+        </div>
       </section>
 
-      <section class="control-section output-section">
-        <div class="section-heading inline">
+      <section class="control-section output-section collapsible-section" data-collapsible>
+        <div class="section-heading inline collapsible-heading">
           <div><h2>Interaction Signal</h2></div>
-          <span id="socketStatus" class="socket-pill"><i></i> Connected</span>
+          <div class="section-heading-actions"><span id="socketStatus" class="socket-pill"><i></i> Connected</span></div>
         </div>
+        <div class="collapsible-content">
         <pre id="outputJson" aria-label="Current interaction signal">{
   "region": null,
   "x": 0,
@@ -319,6 +343,7 @@
           <button id="copyEndpoint" type="button" title="Copy endpoint" aria-label="Copy WebSocket endpoint">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
           </button>
+        </div>
         </div>
       </section>
     </aside>
@@ -376,6 +401,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=20261021-midi-default1"></script>
+  <script src="/static/app.js?v=20261022-pointer-crossfade1"></script>
 </body>
 </html>
