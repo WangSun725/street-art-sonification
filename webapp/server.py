@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageFilter, ImageStat
 
 from image_preprocessing import ImagePreparationError, prepare_uploaded_image
 from output_bridge import ExternalOutputManager
@@ -276,7 +277,7 @@ def qwen_prompt(statement: str) -> str:
     return f"""Analyze this completed street-art image as material for an accessible interactive sound artwork.
 Artist statement: {context[:1200]}
 Return ONLY valid JSON, no markdown. Use this schema:
-{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure|face|gesture|lettering|wall|texture|detail|symbol|fill","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"music_plan":{{"bpm":72,"root":"D","mode":"major|minor|dorian|phrygian|mixolydian|minorPentatonic","meter":"4/4"}}}}
+{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"emotion_profile":{{"label":"warm_reflective","valence":0.5,"arousal":0.5,"tension":0.5,"warmth":0.5,"roughness":0.5}}}}
 The schema strings describe the format only. Never output the literal values "snake_case", "short English label", or a pipe-separated list. Create a unique concrete id, label, and one single type for every detected region.
 Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regions, using the list below as a visual guide. If a listed feature is absent, replace it with another concrete visible painted shape:
 1. main painted figure or largest focal object
@@ -289,7 +290,7 @@ Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regi
 8. another small distinctive painted symbol or detail
 9. one additional concrete painted object, mark, or material feature when clearly visible
 Every label must name what is visibly there (for example "woman with sunglasses", "black upper-left glyphs", "yellow wall field"), never only an abstract word such as "color", "texture", "detail" or "symbol". Use at most one box covering more than 60% of the image. All other boxes must tightly surround different visible shapes. Nested details are allowed, but duplicate boxes are forbidden. Each point must be well inside the intended painted shape, not on a box edge or empty background. Keep meaning under 12 words and connect the visible mark to a tactile or sonic quality.
-Choose the music_plan from the combined emotional character of the visible artwork and Artist Statement. It controls the deterministic real-time sonification engine; it is not a request to generate a song. Use BPM 40-180, one valid root, one valid mode, and 4/4 meter."""
+Choose the emotion_profile from the combined emotional character of the visible artwork and Artist Statement. Give the statement slightly more interpretive weight than the image. Valid labels are warm_reflective, bright_hopeful, dark_melancholic, tense_defiant, and energetic_celebratory. Choose exactly one label. Every emotion value is a number from 0 to 1. Do not choose BPM, key, mode, instruments, or synthesizer settings; the deterministic music engine derives those separately."""
 
 
 def qwen_regions_retry_prompt(statement: str) -> str:
@@ -317,6 +318,104 @@ def normalize_music_plan(raw: dict[str, Any]) -> dict[str, Any]:
         "root": root,
         "mode": mode,
         "meter": "4/4",
+    }
+
+
+def normalize_emotion_profile(raw: dict[str, Any]) -> dict[str, Any]:
+    item = raw.get("emotion_profile") if isinstance(raw.get("emotion_profile"), dict) else {}
+    valid_labels = {
+        "warm_reflective", "bright_hopeful", "dark_melancholic",
+        "tense_defiant", "energetic_celebratory",
+    }
+    label = str(item.get("label", "warm_reflective")).strip().lower()
+    if label not in valid_labels:
+        label = "warm_reflective"
+
+    def unit(name: str, default: float) -> float:
+        try:
+            return round(max(0.0, min(1.0, float(item.get(name, default)))), 4)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "label": label,
+        "valence": unit("valence", 0.55),
+        "arousal": unit("arousal", 0.45),
+        "tension": unit("tension", 0.35),
+        "warmth": unit("warmth", 0.6),
+        "roughness": unit("roughness", 0.3),
+        "source": "combined-image-and-statement",
+    }
+
+
+def derive_music_plan(
+    emotion: dict[str, Any], artwork_path: Path, statement: str,
+) -> dict[str, Any]:
+    """Derive varied but repeatable harmony settings from the finished artwork.
+
+    Qwen describes meaning and affect; it no longer picks a familiar musical
+    default. Tempo follows affect and visual energy, mode follows affect, and
+    the tonic comes from a stable artwork-and-statement fingerprint.
+    """
+    with Image.open(artwork_path) as opened:
+        sample = opened.convert("RGB")
+        sample.thumbnail((128, 128), Image.Resampling.LANCZOS)
+    grayscale = sample.convert("L")
+    luminance = ImageStat.Stat(grayscale)
+    brightness = max(0.0, min(1.0, luminance.mean[0] / 255.0))
+    contrast = max(0.0, min(1.0, luminance.stddev[0] / 72.0))
+    saturation = max(0.0, min(1.0, ImageStat.Stat(sample.convert("HSV")).mean[1] / 255.0))
+    edged = grayscale.filter(ImageFilter.FIND_EDGES)
+    if edged.width > 2 and edged.height > 2:
+        edged = edged.crop((1, 1, edged.width - 1, edged.height - 1))
+    edge_energy = max(0.0, min(1.0, ImageStat.Stat(edged).mean[0] / 64.0))
+
+    valence = float(emotion.get("valence", 0.55))
+    arousal = float(emotion.get("arousal", 0.45))
+    tension = float(emotion.get("tension", 0.35))
+    warmth = float(emotion.get("warmth", 0.6))
+    roughness = float(emotion.get("roughness", 0.3))
+    raw_bpm = (
+        54 + arousal * 62 + tension * 16 + roughness * 10
+        + contrast * 14 + edge_energy * 18 + saturation * 6 - warmth * 5
+    )
+    bpm = int(max(52, min(168, round(raw_bpm / 2) * 2)))
+
+    label = str(emotion.get("label", "warm_reflective"))
+    label_modes = {
+        "warm_reflective": "dorian",
+        "bright_hopeful": "major",
+        "dark_melancholic": "minor",
+        "tense_defiant": "minorPentatonic",
+        "energetic_celebratory": "mixolydian",
+    }
+    mode = label_modes.get(label, "dorian")
+    if tension >= 0.72 and valence < 0.58:
+        mode = "phrygian"
+    elif valence >= 0.72 and arousal >= 0.62:
+        mode = "mixolydian"
+    elif valence >= 0.66 and tension < 0.48:
+        mode = "major"
+    elif valence <= 0.38 and tension < 0.68:
+        mode = "minor"
+
+    fingerprint = hashlib.sha256()
+    fingerprint.update(sample.tobytes())
+    fingerprint.update(statement.strip().lower().encode("utf-8"))
+    roots = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    root = roots[fingerprint.digest()[0] % len(roots)]
+    return {
+        "bpm": bpm,
+        "root": root,
+        "mode": mode,
+        "meter": "4/4",
+        "source": "derived-from-artwork-statement-and-emotion",
+        "features": {
+            "brightness": round(brightness, 4),
+            "saturation": round(saturation, 4),
+            "contrast": round(contrast, 4),
+            "edge_energy": round(edge_energy, 4),
+        },
     }
 
 
@@ -377,11 +476,11 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                 if retry.returncode != 0:
                     raise RuntimeError(retry.stderr.strip()[-600:] or "Vision analysis retry failed")
                 retry_analysis = extract_json(retry.stdout)
-                if "music_plan" not in retry_analysis and isinstance(raw_analysis.get("music_plan"), dict):
-                    retry_analysis["music_plan"] = raw_analysis["music_plan"]
+                if "emotion_profile" not in retry_analysis and isinstance(raw_analysis.get("emotion_profile"), dict):
+                    retry_analysis["emotion_profile"] = raw_analysis["emotion_profile"]
                 raw_analysis = retry_analysis
             proposals = normalize_proposals(raw_analysis)
-            music_plan = normalize_music_plan(raw_analysis)
+            emotion_profile = normalize_emotion_profile(raw_analysis)
             job.update(stage="vision", message="Checking the artwork boundary…", progress=36)
             boundary = await run_command([
                 str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
@@ -418,12 +517,18 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             job.update(stage="music", message="Preparing the algorithmic music system…", progress=92)
             processed_image = manifest.get("processed_image", "artwork.png")
+            music_plan = derive_music_plan(
+                emotion_profile,
+                result_dir / processed_image,
+                statement,
+            )
             manifest.update({
                 "analysis_id": job_id,
                 "image_url": f"/runtime/jobs/{job_id}/result/{processed_image}",
                 "status": "ready",
                 "artist_statement": statement,
                 "music_plan": music_plan,
+                "emotion_profile": emotion_profile,
             })
             for region in manifest["regions"]:
                 region["visual_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['visual_mask']}"

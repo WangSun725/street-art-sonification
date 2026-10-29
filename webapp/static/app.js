@@ -210,43 +210,42 @@ const INSTRUMENT_PREFERENCES = {
   detail: ["keys_mallet", "counter_synth", "lead_synth", "guitar"],
 };
 
-// These files ship with the project, so the performance does not depend on a
-// CDN or network connection. Pitched instruments use the nearest recorded
-// note and transpose it at playback time, like a compact Tone.Sampler bank.
-const LOCAL_SAMPLE_MANIFEST = {
-  bass: [
-    [28, "/static/samples/bass/E1.mp3"],
-    [40, "/static/samples/bass/E2.mp3"],
-    [52, "/static/samples/bass/E3.mp3"],
-    [64, "/static/samples/bass/E4.mp3"],
-  ],
-  guitar: [
-    [40, "/static/samples/guitar/E2.mp3"],
-    [52, "/static/samples/guitar/E3.mp3"],
-    [64, "/static/samples/guitar/E4.mp3"],
-    [72, "/static/samples/guitar/C5.mp3"],
-  ],
-  strings: [
-    [55, "/static/samples/strings/G3.mp3"],
-    [67, "/static/samples/strings/G4.mp3"],
-    [79, "/static/samples/strings/G5.mp3"],
-    [91, "/static/samples/strings/G6.mp3"],
-  ],
-  keys_mallet: [
-    [67, "/static/samples/mallet/G4.mp3"],
-    [79, "/static/samples/mallet/G5.mp3"],
-    [91, "/static/samples/mallet/G6.mp3"],
-    [103, "/static/samples/mallet/G7.mp3"],
-  ],
-  drums: [
-    [36, "/static/samples/drums/kick.wav"],
-    [37, "/static/samples/drums/tom.wav"],
-    [38, "/static/samples/drums/snare.wav"],
-    [39, "/static/samples/drums/clap.wav"],
-    [42, "/static/samples/drums/hihat-closed.wav"],
-    [46, "/static/samples/drums/hihat-open.wav"],
-  ],
+const DEFAULT_EMOTION = {
+  label: "warm_reflective",
+  valence: .55,
+  arousal: .45,
+  tension: .35,
+  warmth: .6,
+  roughness: .3,
+  source: "combined-image-and-statement",
 };
+
+const EMOTION_LABELS = {
+  warm_reflective: "Warm / Reflective",
+  bright_hopeful: "Bright / Hopeful",
+  dark_melancholic: "Dark / Melancholic",
+  tense_defiant: "Tense / Defiant",
+  energetic_celebratory: "Energetic / Celebratory",
+};
+
+function clampUnit(value, fallback = 0) {
+  const number = Number(value);
+  return Math.max(0, Math.min(1, Number.isFinite(number) ? number : fallback));
+}
+
+function normalizeEmotionProfile(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const label = EMOTION_LABELS[source.label] ? source.label : DEFAULT_EMOTION.label;
+  return {
+    label,
+    valence: clampUnit(source.valence, DEFAULT_EMOTION.valence),
+    arousal: clampUnit(source.arousal, DEFAULT_EMOTION.arousal),
+    tension: clampUnit(source.tension, DEFAULT_EMOTION.tension),
+    warmth: clampUnit(source.warmth, DEFAULT_EMOTION.warmth),
+    roughness: clampUnit(source.roughness, DEFAULT_EMOTION.roughness),
+    source: source.source || DEFAULT_EMOTION.source,
+  };
+}
 
 function assignInstrumentRoles(regions) {
   const unused = new Set(INSTRUMENT_ROLES.map((role) => role.id));
@@ -272,6 +271,7 @@ const state = {
   masksVisible: true,
   analyzing: false,
   music: { bpm: 72, root: "D", mode: "dorian" },
+  emotion: { ...DEFAULT_EMOTION },
   harmony: { signature: null, plan: null },
   musicTimeline: {
     duration: MAX_MUSIC_DURATION,
@@ -705,6 +705,44 @@ function musicEventForRegion(region, nx, ny, beatPosition, speed = 0, intensity 
   };
 }
 
+function performanceControls(region, visual, x, speed, mix) {
+  const role = region.instrument?.id || "lead_synth";
+  const source = visual || fallbackRegionVisual(region);
+  const emotion = state.emotion || DEFAULT_EMOTION;
+  const brightness = clampUnit(source.brightness, .5);
+  const saturation = clampUnit(source.saturation, .35);
+  const texture = clampUnit(source.texture, .25);
+  const movement = clampUnit(clampUnit(speed) * .58 + emotion.arousal * .42);
+  const sustained = role === "pad" || role === "strings";
+  const plucked = role === "guitar" || role === "keys_mallet";
+  const rhythmic = role === "drums" || role === "percussion_texture";
+  return {
+    // All renderers receive the same normalized controls. Web Audio reads
+    // them directly; MIDI Out converts them to the fixed CC protocol.
+    movement: Number(movement.toFixed(4)),
+    pan: Number(clampUnit(x, .5).toFixed(4)),
+    expression: Number(clampUnit(mix, 1).toFixed(4)),
+    harmonicIntensity: Number(clampUnit(
+      .12 + emotion.tension * .3 + emotion.roughness * .24 + texture * .2 + saturation * .12,
+    ).toFixed(4)),
+    release: Number(clampUnit(
+      .12 + (1 - emotion.arousal) * .28 + emotion.warmth * .24 + (sustained ? .3 : 0) + (plucked ? -.08 : 0),
+    ).toFixed(4)),
+    attack: Number(clampUnit(
+      .06 + (1 - emotion.arousal) * .34 + (sustained ? .36 : 0) + (rhythmic || plucked ? -.08 : 0),
+    ).toFixed(4)),
+    brightness: Number(clampUnit(
+      .12 + brightness * .45 + emotion.valence * .2 + saturation * .08 + movement * .1,
+    ).toFixed(4)),
+    reverb: Number(clampUnit(
+      .08 + emotion.warmth * .32 + (1 - emotion.arousal) * .18 + (sustained ? .22 : 0),
+    ).toFixed(4)),
+    chorus: Number(clampUnit(
+      .03 + emotion.warmth * .12 + (sustained ? .38 : 0) + (role === "counter_synth" || role === "guitar" ? .09 : 0),
+    ).toFixed(4)),
+  };
+}
+
 function activeMusicVoices(scanning, region, scanRegions, pointerVisual = null) {
   const entries = scanning
     ? scanRegions.slice(0, 5).map((item) => ({
@@ -724,25 +762,32 @@ function activeMusicVoices(scanning, region, scanRegions, pointerVisual = null) 
       }))
       : (region ? [{ region, x: state.pointer.nx, y: state.pointer.ny, intensity: 1, visual: pointerVisual }] : []));
   const beatPosition = musicBeatPosition(scanning);
-  return entries.map((entry) => ({
-    regionId: entry.region.id,
-    mix: Number(Math.max(0, Math.min(1, entry.intensity)).toFixed(4)),
-    instrument: entry.region.instrument?.label || "Lead Synth",
-    instrumentId: entry.region.instrument?.id || "lead_synth",
-    slot: entry.region.instrument?.slot || 1,
-    channel: entry.region.instrument?.midiChannel || 1,
-    ...musicEventForRegion(
+  return entries.map((entry) => {
+    const mix = clampUnit(entry.intensity, 1);
+    const eventSpeed = scanning ? entry.intensity : state.pointer.speed;
+    const visual = entry.visual || fallbackRegionVisual(entry.region);
+    const event = musicEventForRegion(
       entry.region,
       entry.x,
       entry.y,
       beatPosition,
-      scanning ? entry.intensity : state.pointer.speed,
+      eventSpeed,
       entry.intensity,
       (!scanning && performance.now() - state.enteredAt < 90)
         || (scanning && !state.scan.playing && state.scan.manualRegionId === entry.region.id),
-      entry.visual || null,
-    ),
-  }));
+      visual,
+    );
+    return {
+      regionId: entry.region.id,
+      mix: Number(mix.toFixed(4)),
+      instrument: entry.region.instrument?.label || "Lead Synth",
+      instrumentId: entry.region.instrument?.id || "lead_synth",
+      slot: entry.region.instrument?.slot || 1,
+      channel: entry.region.instrument?.midiChannel || 1,
+      ...event,
+      controls: performanceControls(entry.region, visual, entry.x, eventSpeed, mix),
+    };
+  });
 }
 
 function musicBeatPosition(scanning = state.mode === "scan") {
@@ -1365,6 +1410,7 @@ async function loadAnalysis(manifest) {
   state.imagePixels = imagePixels;
   state.regions = assignInstrumentRoles(loadedRegions);
   resetPointerMusicTimeline();
+  state.emotion = normalizeEmotionProfile(manifest.emotion_profile);
   const musicPlan = manifest.music_plan || null;
   if (musicPlan) {
     musicBpm.value = String(Math.max(40, Math.min(200, Math.round(Number(musicPlan.bpm) || 72))));
@@ -1372,7 +1418,7 @@ async function loadAnalysis(manifest) {
     musicMode.value = MUSIC_MODES[musicPlan.mode] ? musicPlan.mode : "dorian";
     applyMusicSettings(false);
   }
-  $("#musicSourceStatus").textContent = harmonyPlanSummary();
+  $("#musicSourceStatus").textContent = `${EMOTION_LABELS[state.emotion.label]} · ${harmonyPlanSummary()}`;
   $("#thumbImage").src = manifest.image_url;
   fitCanvas();
   renderRegionList();
@@ -1699,6 +1745,7 @@ function outputPayload() {
     } : null,
     music: {
       source: "realtime-algorithm",
+      controlProtocol: "shared-normalized-v1",
       masterDurationSeconds: MAX_MUSIC_DURATION,
       playbackSeconds: Number((scanning ? state.scan.seconds : pointerMusicSeconds()).toFixed(3)),
       bpm: state.music.bpm,
@@ -1710,6 +1757,10 @@ function outputPayload() {
         primary: ensureHarmonyPlan().primary.name,
         contrast: ensureHarmonyPlan().contrast.name,
         selection: "automatic-from-artwork",
+      },
+      emotionProfile: {
+        ...state.emotion,
+        displayName: EMOTION_LABELS[state.emotion.label] || "Warm / Reflective",
       },
       beatPosition: Number(musicBeatPosition(scanning).toFixed(3)),
       beatPhase: Number((musicBeatPosition(scanning) % 1).toFixed(3)),
@@ -1745,43 +1796,6 @@ function publishOutput(force = false) {
   else soundEngine.update(payload);
 }
 
-class LocalSampleBank {
-  constructor(context) {
-    this.context = context;
-    this.buffers = new Map();
-    this.loadPromise = null;
-    this.failures = [];
-  }
-  async load() {
-    if (this.loadPromise) return this.loadPromise;
-    const entries = Object.entries(LOCAL_SAMPLE_MANIFEST).flatMap(([instrument, samples]) => (
-      samples.map(([note, url]) => ({ instrument, note, url }))
-    ));
-    this.loadPromise = Promise.allSettled(entries.map(async ({ instrument, note, url }) => {
-      const response = await fetch(url, { cache: "force-cache" });
-      if (!response.ok) throw new Error(`${response.status} ${url}`);
-      const buffer = await this.context.decodeAudioData(await response.arrayBuffer());
-      this.buffers.set(`${instrument}:${note}`, { note, buffer });
-    })).then((results) => {
-      this.failures = results.filter((result) => result.status === "rejected");
-      return { loaded: this.buffers.size, failed: this.failures.length };
-    });
-    return this.loadPromise;
-  }
-  nearest(instrument, note) {
-    const candidates = (LOCAL_SAMPLE_MANIFEST[instrument] || [])
-      .map(([sampleNote]) => this.buffers.get(`${instrument}:${sampleNote}`))
-      .filter(Boolean);
-    if (!candidates.length) return null;
-    return candidates.reduce((nearest, candidate) => (
-      Math.abs(candidate.note - note) < Math.abs(nearest.note - note) ? candidate : nearest
-    ));
-  }
-  exact(instrument, note) {
-    return this.buffers.get(`${instrument}:${note}`) || null;
-  }
-}
-
 class SoundEngine {
   constructor() {
     this.enabled = false;
@@ -1796,6 +1810,8 @@ class SoundEngine {
     this.musicBus = null;
     this.delay = null;
     this.delayFeedback = null;
+    this.delayWet = null;
+    this.reverbWet = null;
     this.regionVoices = new Map();
     this.regionMixBuses = new Map();
     this.noiseBuffer = null;
@@ -1807,8 +1823,8 @@ class SoundEngine {
     this.lastPointerEventId = null;
     this.lastVoiceEvents = new Map();
     this.clockOrigin = 0;
-    this.sampleBank = null;
-    this.samplesReady = false;
+    this.fmNode = null;
+    this.setupPromise = null;
   }
   setOutputLevel(value) {
     this.outputLevel = Math.max(0, Math.min(1, value));
@@ -1820,20 +1836,12 @@ class SoundEngine {
     }
   }
   async toggle() {
-    if (!this.context) this.setup();
+    if (!this.context) await this.setup();
+    else if (this.setupPromise) await this.setupPromise;
     if (this.context.state === "suspended") await this.context.resume();
-    if (!this.samplesReady) {
-      const previousStatus = $("#outputModeStatus").textContent;
-      $("#outputModeStatus").textContent = "Loading local instruments…";
-      const result = await this.sampleBank.load();
-      this.samplesReady = result.loaded > 0;
-      if (result.failed) console.warn(`${result.failed} local instrument samples could not be loaded.`);
-      $("#outputModeStatus").textContent = previousStatus;
-    }
     this.enabled = !this.enabled;
     soundToggle.classList.toggle("active", this.enabled);
     soundToggle.setAttribute("aria-pressed", String(this.enabled));
-    this.gain.gain.setTargetAtTime(0, this.context.currentTime, .04);
     if (!this.enabled) this.stopScan();
     if (this.enabled && state.mode === "scan") {
       this.updateScan(state.scan.regions, state.scan.position, state.scan.seconds, state.scan.playing);
@@ -1841,13 +1849,20 @@ class SoundEngine {
     if (this.enabled && state.mode === "pointer" && state.activeRegion) {
       this.enter(state.activeRegion, state.pointer.nx, state.pointer.ny);
     }
-    if (this.enabled) this.pulse(240, .07, .045);
+    if (!this.enabled) {
+      this.fmNode?.port.postMessage({ type: "clear" });
+    }
   }
   async setEnabled(enabled) {
     if (this.enabled === enabled) return;
     await this.toggle();
   }
-  setup() {
+  async setup() {
+    if (this.setupPromise) return this.setupPromise;
+    this.setupPromise = this.setupAudioGraph();
+    await this.setupPromise;
+  }
+  async setupAudioGraph() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     this.context = new AudioContextClass();
     this.clockOrigin = this.context.currentTime;
@@ -1871,8 +1886,8 @@ class SoundEngine {
     this.delay.delayTime.value = .285;
     this.delayFeedback = this.context.createGain();
     this.delayFeedback.gain.value = .24;
-    const delayWet = this.context.createGain();
-    delayWet.gain.value = .22;
+    this.delayWet = this.context.createGain();
+    this.delayWet.gain.value = .16;
     const convolver = this.context.createConvolver();
     const reverbSeconds = 1.8;
     const impulse = this.context.createBuffer(2, this.context.sampleRate * reverbSeconds, this.context.sampleRate);
@@ -1883,22 +1898,21 @@ class SoundEngine {
       }
     }
     convolver.buffer = impulse;
-    const reverbWet = this.context.createGain();
-    reverbWet.gain.value = .13;
-    this.oscillator = this.context.createOscillator();
-    this.oscillator.type = "sine";
-    this.oscillator.frequency.value = 120;
-    this.oscillator.connect(this.filter).connect(this.gain).connect(this.panner).connect(this.musicBus);
+    this.reverbWet = this.context.createGain();
+    this.reverbWet.gain.value = .12;
+    await this.context.audioWorklet.addModule("/static/fm-worklet.js?v=20261029-unified1");
+    this.fmNode = new AudioWorkletNode(this.context, "street-art-fm", {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    this.fmNode.connect(this.musicBus);
     this.musicBus.connect(this.masterGain);
-    this.musicBus.connect(this.delay).connect(delayWet).connect(this.masterGain);
+    this.musicBus.connect(this.delay).connect(this.delayWet).connect(this.masterGain);
     this.delay.connect(this.delayFeedback).connect(this.delay);
-    this.musicBus.connect(convolver).connect(reverbWet).connect(this.masterGain);
+    this.musicBus.connect(convolver).connect(this.reverbWet).connect(this.masterGain);
     this.masterGain.connect(this.compressor).connect(this.context.destination);
-    this.noiseBuffer = this.context.createBuffer(1, this.context.sampleRate * 2, this.context.sampleRate);
-    const noise = this.noiseBuffer.getChannelData(0);
-    for (let i = 0; i < noise.length; i++) noise[i] = Math.random() * 2 - 1;
-    this.sampleBank = new LocalSampleBank(this.context);
-    this.oscillator.start();
+    $("#outputModeStatus").textContent = "4-operator FM engine ready";
   }
   beatSeconds() {
     return 60 / state.music.bpm;
@@ -1944,39 +1958,37 @@ class SoundEngine {
   }
   leave() {
     if (!this.context) return;
-    this.gain.gain.setTargetAtTime(0, this.context.currentTime, .08);
+    this.syncFMMixes([]);
     this.lastPointerEventId = null;
+  }
+  syncFMMixes(items) {
+    if (!this.fmNode) return;
+    this.fmNode.port.postMessage({
+      type: "mix",
+      regions: items.map((item) => ({
+        id: item.region.id,
+        mix: Math.max(0, Math.min(1, Number(item.intensity) || 0)),
+      })),
+    });
+  }
+  applyControlFrame(events) {
+    if (!this.context || !events.length) return;
+    const average = (name, fallback) => events.reduce(
+      (sum, event) => sum + clampUnit(event.controls?.[name], fallback),
+      0,
+    ) / events.length;
+    const now = this.context.currentTime;
+    // These are the same reverb and movement values sent as MIDI CC91 and
+    // CC1. Only the renderer changes; the musical/control state does not.
+    this.reverbWet?.gain.setTargetAtTime(.035 + average("reverb", .25) * .24, now, .06);
+    this.delayWet?.gain.setTargetAtTime(.04 + average("movement", .4) * .18, now, .06);
   }
   update(payload) {
     if (!this.enabled) return;
-    const now = this.context.currentTime;
-    const activeIds = new Set();
-    for (const item of state.pointer.regions) {
-      activeIds.add(item.region.id);
-      const bus = this.ensureRegionMixBus(item.region);
-      bus.gain.setTargetAtTime(Math.max(0, Math.min(1, item.intensity)), now, .025);
-    }
-    for (const [id, bus] of this.regionMixBuses) {
-      if (!activeIds.has(id)) bus.gain.setTargetAtTime(0, now, .08);
-    }
-    this.playSharedEvents(payload.music?.activeVoices || [], payload.normalized.x, payload.speed);
-    if (!payload.region) return;
-    const region = state.activeRegion;
-    if (payload.edgeProximity > .56 && performance.now() - this.lastTick > 110 - payload.edgeProximity * 55) {
-      const frequency = this.frequency(region, payload.normalized.x, payload.normalized.y);
-      const edgeType = region.instrument?.id === "percussion_texture" ? "square" : "triangle";
-      this.pulse(
-        frequency * 2,
-        .022,
-        .017,
-        edgeType,
-        0,
-        payload.normalized.x * 1.6 - .8,
-        0,
-        this.ensureRegionMixBus(region),
-      );
-      this.lastTick = performance.now();
-    }
+    this.syncFMMixes(state.pointer.regions);
+    const events = payload.music?.activeVoices || [];
+    this.applyControlFrame(events);
+    this.playSharedEvents(events, payload.normalized.x, payload.speed);
   }
   playSharedEvents(events, nx, speed) {
     const activeRegionIds = new Set();
@@ -1994,76 +2006,29 @@ class SoundEngine {
   }
   playPatternEvent(region, event, nx, speed) {
     const role = region.instrument?.id || "lead_synth";
-    const destination = this.ensureRegionMixBus(region);
-    const pan = Math.max(-.82, Math.min(.82, nx * 1.64 - .82));
+    const controls = event.controls || performanceControls(region, event.timbre, nx, speed, event.mix ?? 1);
+    const pan = Math.max(-.82, Math.min(.82, clampUnit(controls.pan, nx) * 1.64 - .82));
     const duration = Math.max(.045, event.durationBeats * this.beatSeconds());
     const velocity = Math.max(.35, Math.min(1, event.velocity / 127));
     const brightness = Math.max(0, Math.min(1, event.timbre?.brightness ?? .5));
     const saturation = Math.max(0, Math.min(1, event.timbre?.saturation ?? .35));
     const texture = Math.max(0, Math.min(1, event.timbre?.texture ?? 0));
-    const visualCutoff = 650 + brightness * 4300 + saturation * 800 + texture * 1000;
-    const frequencies = event.notes.map((note) => 440 * Math.pow(2, (note - 69) / 12));
-    if (role === "drums") {
-      for (const note of event.notes) {
-        if (!this.playSample("drums", note, duration, .34 * velocity, 0, pan, 10000, destination)) {
-          if (note === 36) this.pulse(54, duration * 1.5, .065 * velocity, "sine", 0, pan, 330, destination);
-          else if (note === 38) this.noiseBurst(duration * 1.3, .035 * velocity, 1900, 0, pan, event.patternStep + 3, destination);
-          else this.noiseBurst(duration * .62, .018 * velocity, 6900, 0, pan, event.patternStep + 8, destination);
-        }
-      }
-      return;
-    }
-    if (role === "percussion_texture") {
-      const cutoff = visualCutoff + Math.min(1, speed) * 2400;
-      for (const note of event.notes) {
-        if (!this.playSample("drums", note, duration, (.18 + Math.min(1, speed) * .2) * velocity, 0, pan, cutoff, destination)) {
-          this.noiseBurst(duration, (.018 + Math.min(1, speed) * .025) * velocity, cutoff, 0, pan, event.patternStep + region.index, destination);
-        }
-      }
-      return;
-    }
-    const patches = {
-      lead_synth: { wave: "sawtooth", companion: "triangle", level: .034, cutoff: 3600, attack: .018, release: .13 },
-      counter_synth: { wave: "triangle", companion: "sine", level: .03, cutoff: 2800, attack: .035, release: .2 },
-      bass: { wave: "square", companion: "sine", level: .046, cutoff: 820, attack: .018, release: .16 },
-      guitar: { wave: "triangle", companion: "sawtooth", level: .035, cutoff: 3900, attack: .006, release: .24 },
-      pad: { wave: "sine", companion: "triangle", level: .024, cutoff: 2100, attack: .28, release: .55 },
-      strings: { wave: "sawtooth", companion: "triangle", level: .019, cutoff: 2450, attack: .2, release: .48 },
-      keys_mallet: { wave: "sine", companion: "triangle", level: .038, cutoff: 5600, attack: .004, release: .2 },
-    };
-    const patch = patches[role] || patches.lead_synth;
-    const chordScale = frequencies.length > 1 ? .72 / Math.sqrt(frequencies.length) : 1;
-    frequencies.forEach((frequency, index) => {
-      const midiNote = event.notes[index];
-      const sampleLevel = {
-        bass: .34,
-        guitar: .32,
-        strings: .25,
-        keys_mallet: .3,
-      }[role];
-      if (sampleLevel && this.playSample(
+    const hue = Math.max(0, Math.min(1, event.timbre?.hue ?? 0));
+    const chordScale = event.notes.length > 1 ? .86 / Math.sqrt(event.notes.length) : 1;
+    event.notes.forEach((note, index) => {
+      this.fmNode?.port.postMessage({
+        type: "note",
         role,
-        midiNote,
+        note,
         duration,
-        sampleLevel * velocity * chordScale,
-        0,
-        Math.max(-.9, Math.min(.9, pan + (index - (frequencies.length - 1) / 2) * .09)),
-        event.timbre ? visualCutoff : patch.cutoff + (1 - state.pointer.ny) * 1200,
-        destination,
-      )) return;
-      this.envelopeTone(
-        frequency,
-        duration,
-        patch.level * velocity * chordScale,
-        patch.wave,
-        patch.companion,
-        0,
-        Math.max(-.9, Math.min(.9, pan + (index - (frequencies.length - 1) / 2) * .09)),
-        event.timbre ? visualCutoff : patch.cutoff + (1 - state.pointer.ny) * 1200,
-        patch.attack,
-        patch.release,
-        destination,
-      );
+        velocity: velocity * chordScale,
+        regionId: region.id,
+        pan: Math.max(-.9, Math.min(.9, pan + (index - (event.notes.length - 1) / 2) * .09)),
+        speed: Math.max(0, Math.min(1, speed)),
+        kind: event.eventKind || "note",
+        visual: { brightness, saturation, texture, hue },
+        controls,
+      });
     });
   }
   playSample(instrument, note, duration, volume, delay = 0, pan = 0, cutoff = 10000, destination = null) {
@@ -2183,24 +2148,12 @@ class SoundEngine {
   }
   updateScan(regions, nx, seconds, playing = true, events = []) {
     if (!this.enabled || !this.context) return;
-    const now = this.context.currentTime;
-    this.gain.gain.setTargetAtTime(0, now, .05);
-    const activeIds = new Set();
-    for (const item of regions) {
-      activeIds.add(item.region.id);
-      const bus = this.ensureRegionMixBus(item.region);
-      bus.gain.setTargetAtTime(Math.max(0, Math.min(1, item.intensity)), now, .035);
-    }
-    for (const [id, bus] of this.regionMixBuses) {
-      if (!activeIds.has(id)) bus.gain.setTargetAtTime(0, now, .1);
-    }
+    this.syncFMMixes(regions);
+    this.applyControlFrame(events);
     // The browser renderer receives the exact activeVoices event list placed
     // in the WebSocket frame. MIDI Out consumes that same list server-side,
     // so pitches, chords, note lengths and rhythmic steps stay identical.
     this.playSharedEvents(events, nx, state.scan.playing ? 1 / Math.max(1, state.scan.duration) : 0);
-    for (const [id, voice] of this.regionVoices) {
-      if (!activeIds.has(id)) voice.gain.gain.setTargetAtTime(0, now, .2);
-    }
     if (!playing && regions[0] && performance.now() - this.lastSeekAccent > 90) {
       this.lastSeekAccent = performance.now();
     }
@@ -2310,9 +2263,7 @@ class SoundEngine {
   }
   stopScan() {
     if (!this.context) return;
-    const now = this.context.currentTime;
-    for (const voice of this.regionVoices.values()) voice.gain.gain.setTargetAtTime(0, now, .12);
-    for (const bus of this.regionMixBuses.values()) bus.gain.setTargetAtTime(0, now, .12);
+    this.syncFMMixes([]);
   }
   resetScanEvents() {
     this.colorStates.clear();
@@ -2328,6 +2279,7 @@ class SoundEngine {
     this.regionVoices.clear();
     for (const bus of this.regionMixBuses.values()) bus.disconnect();
     this.regionMixBuses.clear();
+    this.fmNode?.port.postMessage({ type: "clear" });
     this.lastPointerEventId = null;
     this.lastVoiceEvents.clear();
     this.resetScanEvents();
@@ -3310,7 +3262,9 @@ function applyMusicSettings(announce = true) {
   if (state.mode === "scan") soundEngine.updateScan(state.scan.regions, state.scan.position, state.scan.seconds, state.scan.playing);
   else if (state.lastOutput) soundEngine.update(state.lastOutput);
   publishOutput(true);
-  $("#musicSourceStatus").textContent = state.regions.length ? harmonyPlanSummary() : "Automatic harmony";
+  $("#musicSourceStatus").textContent = state.regions.length
+    ? `${EMOTION_LABELS[state.emotion.label]} · ${harmonyPlanSummary()}`
+    : "Automatic harmony";
   if (announce) {
     const label = musicMode.options[musicMode.selectedIndex]?.textContent || mode;
     statusText.textContent = `Music set to ${bpm} BPM · ${root} ${label}.`;
@@ -3514,6 +3468,7 @@ async function startOver() {
   resetPointerMusicTimeline();
   resetPointerCrossfade();
   state.manifest = null;
+  state.emotion = { ...DEFAULT_EMOTION };
   state.regions = [];
   state.activeRegion = null;
   fileInput.value = "";

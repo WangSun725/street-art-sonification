@@ -38,15 +38,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "id": "vertical-position",
             "enabled": True,
             "source": "normalized.y",
-            "protocol": "midi",
-            "target": "74",
-            "message": "cc",
+            "protocol": "osc",
+            "target": "/streetart/position/y",
+            "message": "value",
             "channel": 1,
             "inputMin": 0,
             "inputMax": 1,
             "outputMin": 0,
-            "outputMax": 127,
-            "invert": True,
+            "outputMax": 1,
+            "invert": False,
             "smoothingMs": 80,
         },
         {
@@ -100,6 +100,18 @@ SOURCES = {
     "region.enter",
 }
 
+PERFORMANCE_CCS: dict[str, int] = {
+    "movement": 1,
+    "pan": 10,
+    "expression": 11,
+    "harmonicIntensity": 71,
+    "release": 72,
+    "attack": 73,
+    "brightness": 74,
+    "reverb": 91,
+    "chorus": 93,
+}
+
 
 def _number(value: Any, default: float) -> float:
     try:
@@ -138,7 +150,7 @@ class ExternalOutputManager:
         self._last_region: str | None = None
         self._last_output_mode: str | None = None
         self._last_voice_events: dict[str, str] = {}
-        self._last_expression: dict[int, int] = {}
+        self._last_performance_cc: dict[tuple[int, int], int] = {}
         self._lock = threading.RLock()
         self.last_activity: dict[str, Any] = {
             "status": "idle",
@@ -352,11 +364,18 @@ class ExternalOutputManager:
             active_ids.add(voice_region)
             channel = int(_clamp(_number(voice.get("channel"), 1), 1, 16))
             active_channels.add(channel)
-            expression = int(round(_clamp(_number(voice.get("mix"), 1), 0, 1) * 127))
-            previous_expression = self._last_expression.get(channel)
-            if previous_expression is None or abs(expression - previous_expression) >= 2:
-                self._send_midi({"message": "cc", "target": "11", "channel": channel}, expression)
-                self._last_expression[channel] = expression
+            controls = voice.get("controls") if isinstance(voice.get("controls"), dict) else {}
+            for control_name, cc_number in PERFORMANCE_CCS.items():
+                fallback = voice.get("mix", 1) if control_name == "expression" else (.5 if control_name == "pan" else 0)
+                cc_value = int(round(_clamp(_number(controls.get(control_name), fallback), 0, 1) * 127))
+                cc_key = (channel, cc_number)
+                previous_cc = self._last_performance_cc.get(cc_key)
+                if previous_cc is None or abs(cc_value - previous_cc) >= 2:
+                    self._send_midi(
+                        {"message": "cc", "target": str(cc_number), "channel": channel},
+                        cc_value,
+                    )
+                    self._last_performance_cc[cc_key] = cc_value
             event_id = str(voice.get("eventId") or "")
             notes = voice.get("notes")
             if not isinstance(notes, list):
@@ -378,10 +397,13 @@ class ExternalOutputManager:
                 )
         for inactive in set(self._last_voice_events) - active_ids:
             self._last_voice_events.pop(inactive, None)
-        for channel in set(self._last_expression) - active_channels:
-            if self._last_expression[channel] != 0:
+        for cc_key in list(self._last_performance_cc):
+            channel, cc_number = cc_key
+            if channel in active_channels:
+                continue
+            if cc_number == 11 and self._last_performance_cc[cc_key] != 0:
                 self._send_midi({"message": "cc", "target": "11", "channel": channel}, 0)
-            self._last_expression.pop(channel, None)
+            self._last_performance_cc.pop(cc_key, None)
 
     def _ensure_osc(self) -> Any:
         target = (self.config["osc"]["host"], self.config["osc"]["port"])
@@ -492,7 +514,7 @@ class ExternalOutputManager:
                     pass
         self._midi_port = None
         self._midi_target = None
-        self._last_expression.clear()
+        self._last_performance_cc.clear()
 
     def _close_outputs(self) -> None:
         self._close_midi()

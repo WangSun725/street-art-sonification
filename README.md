@@ -148,11 +148,11 @@ Artwork image + artist statement
                 ↓
 Qwen3-VL 2B Instruct 4-bit
        ↙                    ↘
-Street-art region plan    BPM / root / mode
+Street-art region plan    Emotion profile
        ↓                    ↓
-SAM 2.1 Hiera Tiny    Algorithmic music rules
+SAM 2.1 Hiera Tiny    Visual feature mapping
        ↓                    ↓
-Region masks       Nine instrument roles
+Region masks       BPM / root / mode
        ↘                    ↙
           Shared event engine
                  ↓
@@ -160,17 +160,17 @@ Mouse / WebEyeTrack / timed scan
                 ↓
 Region-controlled MIDI events
         ↙               ↘
-   Web Audio            MIDI Out
+4-operator FM Audio     MIDI Out
                            ↘
                  Optional OSC / CC mapping
 ```
 
 - **Qwen3-VL 2B Instruct 4-bit** identifies street-art-specific subjects, lettering, symbols, wall material, paint fields, and weathered textures.
-- Qwen3-VL also translates the image and Artist Statement into global tempo, root, and mode settings for the rule-based music engine.
+- Qwen3-VL translates the image and Artist Statement into an emotion profile. A deterministic mapping then derives BPM from emotional arousal and visual energy, mode from valence and tension, and root from a stable artwork-and-statement fingerprint. This avoids repeatedly falling back to the same familiar key and tempo while keeping repeated analyses reproducible.
 - **SAM 2.1 Hiera Tiny** converts the proposed locations into pixel-level masks.
 - The **algorithmic music engine** assigns each region one of nine musical roles, quantises every note to the shared key and tempo, and generates melody, chords, bass, drums, and texture in real time.
 - **WebEyeTrack** uses a lightweight BlazeGaze CNN, MediaPipe face landmarks, head-pose compensation, and local calibration to estimate a screen gaze point.
-- **Web Audio** plays bundled local samples for Bass, Guitar, Strings, Mallet, Drums, and Percussion, with synthesis for the two lead voices and Pad. It automatically falls back to synthesis if a sample cannot be decoded.
+- **Web Audio** uses a shared four-operator FM/phase-modulation engine implemented in an AudioWorklet. Each of the nine roles has a distinct routing algorithm, operator ratios, modulation envelopes, feedback, filtering, drive, and articulation. It renders exactly the same note, chord, rhythm, velocity, duration, crossfade, and control events used by MIDI Out; only the final instrument renderer changes.
 - **Mido + python-rtmidi** send MIDI notes and controller values through CoreMIDI.
 - **python-osc** sends OSC messages to a local or network receiver.
 
@@ -190,7 +190,7 @@ Each playable region receives one unique musical role. The same role is used by 
 
 When an artwork has fewer than nine regions, the semantic region types determine which subset of roles is used. For example, lettering prefers Drums, wall areas prefer Pad, figures prefer Lead Synth, and textured paint prefers Percussion / Texture.
 
-The system creates notes only while the artwork is being explored. Position selects pitches from the shared scale, region type selects an instrument role, and local colour, brightness, texture, movement, and boundary distance shape articulation and timbre. The rhythm engine mixes long notes, rests, quarters, eighths, sixteenths, dotted values, syncopation, and triplets in four-bar A–A′–B–A phrases instead of repeating one fixed 16-step pattern. The harmony engine automatically selects primary and contrasting progressions from major or minor Roman-numeral pools, so the same progressions transpose to all twelve keys. Guitar, Pad, Strings, and Keys can play simultaneous chords as well as broken patterns; chord voicings may be inverted, rootless-feeling, spread across several octaves, and extended with 7ths, 9ths, 11ths, or 13ths. Pointer / Gaze activates one region at a time; Left-to-Right Scan can layer up to five regions under the scan line. Web Audio and MIDI Out consume the same algorithmic note, chord, rhythm, velocity, duration, and channel events; only their sound destination differs.
+The system creates notes only while the artwork is being explored. Position selects pitches from the shared scale, region type selects an instrument role, and local colour, brightness, texture, movement, and the image-and-statement emotion profile shape articulation and timbre. The rhythm engine mixes long notes, rests, quarters, eighths, sixteenths, dotted values, syncopation, and triplets in four-bar A–A′–B–A phrases instead of repeating one fixed 16-step pattern. The harmony engine automatically selects primary and contrasting progressions from major or minor Roman-numeral pools, so the same progressions transpose to all twelve keys. Guitar, Pad, Strings, and Keys can play simultaneous chords as well as broken patterns; chord voicings may be inverted, spread across several octaves, and extended with 7ths, 9ths, 11ths, or 13ths. Pointer / Gaze activates one region at a time; Left-to-Right Scan can layer up to five regions under the scan line. Web Audio and MIDI Out consume one shared performance frame, so neither mode adds its own extra notes.
 
 No model training is required.
 
@@ -277,6 +277,8 @@ The default OSC mappings include `/streetart/position/x`, `/streetart/brightness
 5. Add optional custom MIDI mappings for visual controls such as Y position or movement speed, then select **Apply & save**.
 6. Select **MIDI Out** at the top of the performance controls. This enables the local output route; the advanced switch and mappings can still be adjusted manually.
 
+The shared performance frame also sends a fixed controller set on each active instrument channel: movement/modulation on CC1, pan on CC10, expression/crossfade on CC11, harmonic intensity on CC71, release on CC72, attack on CC73, brightness on CC74, reverb on CC91, and chorus on CC93. Web Audio reads the same normalized values directly. Advanced Control Mapping remains optional for additional OSC or MIDI destinations.
+
 In Pointer / Gaze mode, Web Audio starts or resumes the ten-minute music clock when Sound is enabled; MIDI Out starts or resumes the same clock when that output is selected. Moving or looking into a region gates its assigned generated track at the current global score position rather than restarting it. The browser renderer and MIDI Out both consume the same `music.activeVoices` events, including notes, chords, rhythmic steps, velocities, durations, channels, and `playbackSeconds`. Ableton can therefore replace the embedded timbres without changing the musical performance. Continuous values such as position, speed, brightness, and scan progress can additionally become MIDI CC values or OSC numbers. Selecting **Web Audio** suppresses MIDI messages while keeping optional OSC control available; selecting **MIDI Out** mutes the built-in browser sound and enables MIDI routing.
 
 Recommended Ableton Drum Rack pads for the current algorithm:
@@ -312,7 +314,7 @@ webapp/output_bridge/         MIDI, OSC, and mapping engine
 webapp/static/index.html      Interface structure
 webapp/static/styles.css      Interface appearance
 webapp/static/app.js          Interaction, sound, and live data
-webapp/static/samples/        Offline instrument and drum recordings
+webapp/static/fm-worklet.js   Four-operator FM synthesis engine
 requirements-interaction.txt  Qwen and server dependencies
 requirements-sam.txt          SAM dependencies
 ```
@@ -326,8 +328,7 @@ More technical notes are available in [`WEB_DEMO.md`](WEB_DEMO.md) and [`INTERAC
 - WebEyeTrack by RedForestAI, MIT License.
 - MediaPipe Tasks Vision by Google, Apache 2.0.
 - MLX-VLM, MIT License.
-- Pitched instrument samples from tonejs-instruments, CC BY 3.0. See [`webapp/static/samples/LICENSES.md`](webapp/static/samples/LICENSES.md).
-- Drum and percussion samples from octalmusic/octal-samples, CC0 1.0. See [`webapp/static/samples/LICENSES.md`](webapp/static/samples/LICENSES.md).
+- Legacy sample files remain in the repository for backwards compatibility, but the current Web Audio engine does not load them. Their original credits are preserved in [`webapp/static/samples/LICENSES.md`](webapp/static/samples/LICENSES.md).
 
 ### Related group prototypes and design references
 
