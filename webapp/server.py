@@ -23,6 +23,7 @@ from PIL import Image, ImageFilter, ImageStat
 
 from image_preprocessing import ImagePreparationError, prepare_uploaded_image
 from output_bridge import ExternalOutputManager
+from region_proposals import is_wall_crack, normalize_location
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,8 @@ QWEN_PYTHON = ROOT / ".interaction-env" / "bin" / "python"
 SAM_PYTHON = ROOT / ".venv" / "bin" / "python"
 QWEN_MODEL = ROOT / "third_party" / "models" / "Qwen3-VL-2B-Instruct-4bit"
 SAM_SCRIPT = WEB_DIR / "analyze_regions.py"
+SAM3_MODEL = ROOT / "third_party" / "models" / "SAM3-6bit"
+SAM3_SCRIPT = WEB_DIR / "sam3_regions.py"
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -133,21 +136,13 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(raw.get("regions", [])):
         if not isinstance(item, dict):
             continue
-        try:
-            box = [max(0, min(1000, int(float(v)))) for v in item["bbox"][:4]]
-        except (KeyError, TypeError, ValueError):
+        label_hint = str(item.get("label") or item.get("region") or "")
+        crack = is_wall_crack(label_hint)
+        thin = crack or item.get("type") == "texture"
+        location = normalize_location(item, thin=thin)
+        if location is None:
             continue
-        if len(box) != 4:
-            continue
-        x1, y1, x2, y2 = box
-        if x2 - x1 < 25 or y2 - y1 < 25:
-            continue
-        try:
-            point = [max(0, min(1000, int(float(v)))) for v in item.get("point", [])[:2]]
-            if len(point) != 2:
-                raise ValueError
-        except (TypeError, ValueError):
-            point = [(x1 + x2) // 2, (y1 + y2) // 2]
+        box = location["bbox"]
         # Different abstract labels on the same rectangle are not different
         # playable regions. Remove near-identical proposals before SAM.
         def overlap(a: list[int], b: list[int]) -> float:
@@ -156,9 +151,15 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
             intersection = ix * iy
             union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection
             return intersection / union if union else 0
-        if any(overlap(box, previous) > 0.92 for previous in seen_boxes):
-            continue
-        seen_boxes.append(box)
+        parts = []
+        raw_parts = item.get("parts")
+        if isinstance(raw_parts, list):
+            for raw_part in raw_parts[:8]:
+                part = normalize_location(raw_part, thin=thin) if isinstance(raw_part, dict) else None
+                if part and all(overlap(part["bbox"], other) <= .8 for other in [box, *[p["bbox"] for p in parts]]):
+                    parts.append(part)
+                if len(parts) == 3:
+                    break
         region_name = str(item.get("region") or "").strip()
         label = str(item.get("label") or region_name or f"Region {index + 1}").strip()[:48]
         generic_labels = {
@@ -187,24 +188,38 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
         if region_type not in valid_types:
             semantic_hint = f"{region_name} {label} {meaning}".lower()
             region_type = next((kind for kind in valid_types if kind in semantic_hint), "figure" if index == 0 else "detail")
-        margin_x = max(8, int((x2 - x1) * 0.06))
-        margin_y = max(8, int((y2 - y1) * 0.06))
-        if not (x1 + margin_x <= point[0] <= x2 - margin_x and y1 + margin_y <= point[1] <= y2 - margin_y):
-            point = [(x1 + x2) // 2, (y1 + y2) // 2]
+        if crack:
+            region_type = "texture"
         raw_id = str(item.get("id") or "").strip()
         if raw_id.lower() in {"snake_case", "region_id", "id"} or raw_id.isdigit():
             raw_id = ""
+        region_id = slug(raw_id or region_name or label, f"region_{index + 1}")
+        same_feature = next((
+            proposal for proposal in proposals
+            if proposal["id"] == region_id
+            and proposal["type"] == region_type
+            and proposal["label"].casefold() == label.casefold()
+        ), None)
+        if same_feature is not None:
+            locations = same_feature.setdefault("parts", [])
+            for candidate in [location, *parts]:
+                if len(locations) >= 3:
+                    break
+                if all(overlap(candidate["bbox"], other["bbox"]) <= .5 for other in [same_feature, *locations]):
+                    locations.append(candidate)
+            continue
+        if len(proposals) == 9 or (any(overlap(box, previous) > .92 for previous in seen_boxes) and not parts):
+            continue
+        seen_boxes.append(box)
         proposals.append({
-            "id": slug(raw_id or region_name or label, f"region_{index + 1}"),
+            "id": region_id,
             "label": label,
             "type": region_type,
-            "bbox": box,
-            "point": point,
+            **location,
+            **({"parts": parts} if parts else {}),
             "meaning": meaning[:180],
             "color_rgb": colors[len(proposals) % len(colors)],
         })
-        if len(proposals) == 9:
-            break
 
     fallbacks = [
         ("paint_surface", "Painted wall field", "wall", [0, 0, 1000, 1000], [80, 100]),
@@ -277,7 +292,7 @@ def qwen_prompt(statement: str) -> str:
     return f"""Analyze this completed street-art image as material for an accessible interactive sound artwork.
 Artist statement: {context[:1200]}
 Return ONLY valid JSON, no markdown. Use this schema:
-{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"emotion_profile":{{"label":"warm_reflective","valence":0.5,"arousal":0.5,"tension":0.5,"warmth":0.5,"roughness":0.5}}}}
+{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"gems_profile":{{"image":{{"weights":{{"wonder":0.1,"transcendence":0.1,"tenderness":0.1,"nostalgia":0.1,"peacefulness":0.1,"power":0.1,"joyful_activation":0.1,"tension":0.1,"sadness":0.1}},"evidence":"visible evidence only"}},"statement":{{"weights":{{"wonder":0.1,"transcendence":0.1,"tenderness":0.1,"nostalgia":0.1,"peacefulness":0.1,"power":0.1,"joyful_activation":0.1,"tension":0.1,"sadness":0.1}},"evidence":"statement evidence only"}},"combined_rationale":"one short explanation"}}}}
 The schema strings describe the format only. Never output the literal values "snake_case", "short English label", or a pipe-separated list. Create a unique concrete id, label, and one single type for every detected region.
 Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regions, using the list below as a visual guide. If a listed feature is absent, replace it with another concrete visible painted shape:
 1. main painted figure or largest focal object
@@ -290,7 +305,8 @@ Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regi
 8. another small distinctive painted symbol or detail
 9. one additional concrete painted object, mark, or material feature when clearly visible
 Every label must name what is visibly there (for example "woman with sunglasses", "black upper-left glyphs", "yellow wall field"), never only an abstract word such as "color", "texture", "detail" or "symbol". Use at most one box covering more than 60% of the image. All other boxes must tightly surround different visible shapes. Nested details are allowed, but duplicate boxes are forbidden. Each point must be well inside the intended painted shape, not on a box edge or empty background. Keep meaning under 12 words and connect the visible mark to a tactile or sonic quality.
-Choose the emotion_profile from the combined emotional character of the visible artwork and Artist Statement. Give the statement slightly more interpretive weight than the image. Valid labels are warm_reflective, bright_hopeful, dark_melancholic, tense_defiant, and energetic_celebratory. Choose exactly one label. Every emotion value is a number from 0 to 1. Do not choose BPM, key, mode, instruments, or synthesizer settings; the deterministic music engine derives those separately."""
+Use the complete GEMS-9 framework without inventing, merging, or renaming categories: wonder (awe and being moved), transcendence (inspiration and spiritual elevation), tenderness (affection and warmth), nostalgia (dreamy sentiment and memory), peacefulness (calm and serenity), power (strength and triumph), joyful_activation (lively joy and desire to move), tension (agitation and unease), and sadness (sorrow and melancholy).
+For image.weights, judge only visible content, colour, composition, gesture, material, and atmosphere; do not use the Artist Statement. For statement.weights, judge only the supplied Artist Statement; do not use visible features. Give every category a relative value from 0 to 1. Values do not need to sum to 1 because the application normalizes them. Evidence must explicitly name the visual or textual basis. Do not choose one exclusive emotion. Do not output valence, arousal, warmth, roughness, BPM, key, mode, instruments, or synthesizer settings; the deterministic music engine combines and maps the GEMS-9 profile separately."""
 
 
 def qwen_regions_retry_prompt(statement: str) -> str:
@@ -298,6 +314,13 @@ def qwen_regions_retry_prompt(statement: str) -> str:
     return f"""Identify 6 to 9 distinct visible regions in this street-art image.
 Artist statement: {context[:600]}
 Return ONLY one valid JSON object with a regions array. Each item must have a unique concrete id, a short visible English label, exactly one type, bbox, point, and a meaning under 12 words. Valid types are figure, face, gesture, lettering, wall, texture, detail, symbol, and fill. Coordinates are integers from 0 to 1000. Bbox has four numbers. Point has exactly two numbers well inside the visible shape. Never use schema placeholders or pipe-separated values. Prefer actual painted figures, faces, hands, lettering, marks, colour fields, wall material, drips, cracks, and spray texture. Do not repeat boxes."""
+
+
+def qwen_parts_prompt(proposals: list[dict]) -> str:
+    regions = [{key: proposal[key] for key in ("id", "label", "bbox")} for proposal in proposals]
+    return f"""Locate additional visible patches of the SAME named painted mark or wall texture in this street-art image.
+Known regions, with the first patch already located: {json.dumps(regions, ensure_ascii=False)}
+Return a JSON object with a "regions" array. Each entry has an existing id and "parts", an array of up to three objects with bbox [x1,y1,x2,y2] and point [x,y]. Use normalized integer coordinates 0 to 1000 relative to the entire image. Each box must tightly enclose a separate visible patch of the same feature and each point must be inside it. Do not include the existing box, unrelated marks, or parts you are unsure about. Return an empty regions array if there are no additional visible patches."""
 
 
 def normalize_music_plan(raw: dict[str, Any]) -> dict[str, Any]:
@@ -321,40 +344,91 @@ def normalize_music_plan(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_emotion_profile(raw: dict[str, Any]) -> dict[str, Any]:
-    item = raw.get("emotion_profile") if isinstance(raw.get("emotion_profile"), dict) else {}
-    valid_labels = {
-        "warm_reflective", "bright_hopeful", "dark_melancholic",
-        "tense_defiant", "energetic_celebratory",
-    }
-    label = str(item.get("label", "warm_reflective")).strip().lower()
-    if label not in valid_labels:
-        label = "warm_reflective"
+GEMS_DIMENSIONS = (
+    "wonder", "transcendence", "tenderness", "nostalgia", "peacefulness",
+    "power", "joyful_activation", "tension", "sadness",
+)
+DEFAULT_GEMS_WEIGHTS = {
+    "wonder": 0.12,
+    "transcendence": 0.08,
+    "tenderness": 0.10,
+    "nostalgia": 0.10,
+    "peacefulness": 0.20,
+    "power": 0.10,
+    "joyful_activation": 0.12,
+    "tension": 0.10,
+    "sadness": 0.08,
+}
 
-    def unit(name: str, default: float) -> float:
+
+def normalize_gems_weights(value: Any) -> dict[str, float]:
+    source = value if isinstance(value, dict) else {}
+    values: dict[str, float] = {}
+    for name in GEMS_DIMENSIONS:
         try:
-            return round(max(0.0, min(1.0, float(item.get(name, default)))), 4)
+            values[name] = max(0.0, min(1.0, float(source.get(name, 0))))
         except (TypeError, ValueError):
-            return default
+            values[name] = 0.0
+    total = sum(values.values())
+    if total <= 0:
+        values = dict(DEFAULT_GEMS_WEIGHTS)
+        total = sum(values.values())
+    return {name: round(values[name] / total, 6) for name in GEMS_DIMENSIONS}
 
+
+def normalize_gems_profile(raw: dict[str, Any]) -> dict[str, Any]:
+    item = raw.get("gems_profile") if isinstance(raw.get("gems_profile"), dict) else {}
+    image_item = item.get("image") if isinstance(item.get("image"), dict) else {}
+    statement_item = item.get("statement") if isinstance(item.get("statement"), dict) else {}
+    image_weights = normalize_gems_weights(image_item.get("weights"))
+    statement_weights = normalize_gems_weights(statement_item.get("weights"))
+    image_share = 0.45
+    statement_share = 0.55
+    combined = normalize_gems_weights({
+        name: image_weights[name] * image_share + statement_weights[name] * statement_share
+        for name in GEMS_DIMENSIONS
+    })
+    ranked = sorted(GEMS_DIMENSIONS, key=lambda name: combined[name], reverse=True)
+    higher_order = {
+        "sublimity": round(sum(combined[name] for name in (
+            "wonder", "transcendence", "tenderness", "nostalgia", "peacefulness",
+        )), 6),
+        "vitality": round(combined["power"] + combined["joyful_activation"], 6),
+        "unease": round(combined["tension"] + combined["sadness"], 6),
+    }
+
+    def evidence(source: dict[str, Any], fallback: str) -> str:
+        text = str(source.get("evidence", "")).strip()
+        return (text or fallback)[:320]
+
+    rationale = str(item.get("combined_rationale", "")).strip()
     return {
-        "label": label,
-        "valence": unit("valence", 0.55),
-        "arousal": unit("arousal", 0.45),
-        "tension": unit("tension", 0.35),
-        "warmth": unit("warmth", 0.6),
-        "roughness": unit("roughness", 0.3),
-        "source": "combined-image-and-statement",
+        "framework": "GEMS-9",
+        "weights": combined,
+        "dominant": ranked[0],
+        "secondary": ranked[1],
+        "higher_order": higher_order,
+        "image": {
+            "weights": image_weights,
+            "evidence": evidence(image_item, "GEMS-9 estimate based on visible artwork features."),
+        },
+        "statement": {
+            "weights": statement_weights,
+            "evidence": evidence(statement_item, "GEMS-9 estimate based on the Artist Statement."),
+        },
+        "combination": {"image": image_share, "statement": statement_share},
+        "rationale": (rationale or "Image and statement GEMS-9 profiles were combined deterministically.")[:320],
+        "source": "qwen3-vl-separate-image-and-statement-gems9",
     }
 
 
 def derive_music_plan(
-    emotion: dict[str, Any], artwork_path: Path, statement: str,
+    gems: dict[str, Any], artwork_path: Path, statement: str,
 ) -> dict[str, Any]:
     """Derive varied but repeatable harmony settings from the finished artwork.
 
-    Qwen describes meaning and affect; it no longer picks a familiar musical
-    default. Tempo follows affect and visual energy, mode follows affect, and
+    Qwen estimates a complete GEMS-9 profile without selecting music settings.
+    Tempo and mode follow a deterministic GEMS mapping plus visual energy, and
     the tonic comes from a stable artwork-and-statement fingerprint.
     """
     with Image.open(artwork_path) as opened:
@@ -370,34 +444,31 @@ def derive_music_plan(
         edged = edged.crop((1, 1, edged.width - 1, edged.height - 1))
     edge_energy = max(0.0, min(1.0, ImageStat.Stat(edged).mean[0] / 64.0))
 
-    valence = float(emotion.get("valence", 0.55))
-    arousal = float(emotion.get("arousal", 0.45))
-    tension = float(emotion.get("tension", 0.35))
-    warmth = float(emotion.get("warmth", 0.6))
-    roughness = float(emotion.get("roughness", 0.3))
+    weights = normalize_gems_weights(gems.get("weights"))
+    activation = sum(weights[name] * coefficient for name, coefficient in {
+        "wonder": 0.62,
+        "transcendence": 0.45,
+        "tenderness": 0.25,
+        "nostalgia": 0.32,
+        "peacefulness": 0.15,
+        "power": 0.90,
+        "joyful_activation": 0.98,
+        "tension": 0.85,
+        "sadness": 0.20,
+    }.items())
     raw_bpm = (
-        54 + arousal * 62 + tension * 16 + roughness * 10
-        + contrast * 14 + edge_energy * 18 + saturation * 6 - warmth * 5
+        52 + activation * 88 + contrast * 12 + edge_energy * 16 + saturation * 5
     )
     bpm = int(max(52, min(168, round(raw_bpm / 2) * 2)))
 
-    label = str(emotion.get("label", "warm_reflective"))
-    label_modes = {
-        "warm_reflective": "dorian",
-        "bright_hopeful": "major",
-        "dark_melancholic": "minor",
-        "tense_defiant": "minorPentatonic",
-        "energetic_celebratory": "mixolydian",
+    mode_scores = {
+        "major": weights["wonder"] + weights["tenderness"] + weights["peacefulness"],
+        "dorian": weights["transcendence"] + weights["nostalgia"],
+        "mixolydian": weights["power"] + weights["joyful_activation"],
+        "phrygian": weights["tension"],
+        "minor": weights["sadness"],
     }
-    mode = label_modes.get(label, "dorian")
-    if tension >= 0.72 and valence < 0.58:
-        mode = "phrygian"
-    elif valence >= 0.72 and arousal >= 0.62:
-        mode = "mixolydian"
-    elif valence >= 0.66 and tension < 0.48:
-        mode = "major"
-    elif valence <= 0.38 and tension < 0.68:
-        mode = "minor"
+    mode = max(mode_scores, key=mode_scores.get)
 
     fingerprint = hashlib.sha256()
     fingerprint.update(sample.tobytes())
@@ -409,7 +480,8 @@ def derive_music_plan(
         "root": root,
         "mode": mode,
         "meter": "4/4",
-        "source": "derived-from-artwork-statement-and-emotion",
+        "source": "derived-from-artwork-statement-and-gems9",
+        "gems_dominant": gems.get("dominant", "peacefulness"),
         "features": {
             "brightness": round(brightness, 4),
             "saturation": round(saturation, 4),
@@ -476,26 +548,59 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                 if retry.returncode != 0:
                     raise RuntimeError(retry.stderr.strip()[-600:] or "Vision analysis retry failed")
                 retry_analysis = extract_json(retry.stdout)
-                if "emotion_profile" not in retry_analysis and isinstance(raw_analysis.get("emotion_profile"), dict):
-                    retry_analysis["emotion_profile"] = raw_analysis["emotion_profile"]
+                if "gems_profile" not in retry_analysis and isinstance(raw_analysis.get("gems_profile"), dict):
+                    retry_analysis["gems_profile"] = raw_analysis["gems_profile"]
                 raw_analysis = retry_analysis
             proposals = normalize_proposals(raw_analysis)
-            emotion_profile = normalize_emotion_profile(raw_analysis)
+            gems_profile = normalize_gems_profile(raw_analysis)
             job.update(stage="vision", message="Checking the artwork boundary…", progress=36)
-            boundary = await run_command([
-                str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
-                "--model", str(QWEN_MODEL), "--image", str(image_path),
-                "--prompt", qwen_artwork_prompt(preprocessing), "--max-tokens", "280",
-                "--temperature", "0", "--no-verbose",
-            ], timeout=180)
             artwork_payload: dict[str, Any] = {}
-            if boundary.returncode == 0:
+            try:
+                boundary = await run_command([
+                    str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+                    "--model", str(QWEN_MODEL), "--image", str(image_path),
+                    "--prompt", qwen_artwork_prompt(preprocessing), "--max-tokens", "280",
+                    "--temperature", "0", "--no-verbose",
+                ], timeout=180)
+            except subprocess.TimeoutExpired:
+                boundary = None  # Keep the full artwork and continue with the regions already found.
+            if boundary is not None and boundary.returncode == 0:
                 (image_path.parent / "artwork-boundary-output.txt").write_text(boundary.stdout, encoding="utf-8")
                 try:
                     artwork_payload = {"artwork": extract_first_object(boundary.stdout)}
                 except ValueError:
                     artwork_payload = {}
             artwork = normalize_artwork(artwork_payload, preprocessing)
+            repeated = [
+                proposal for proposal in proposals
+                if not proposal.get("parts")
+                and not is_wall_crack(proposal["label"])
+                and proposal["id"] not in {"upper_marks", "lower_texture", "left_marks", "right_marks"}
+                and re.search(r"\b(?:glyphs|dots|drips|splashes|speckles|streaks|stripes|patches|lettering)\b", proposal["label"], re.I)
+            ][:3]
+            if repeated:
+                job.update(message="Locating repeated marks…", progress=40)
+                try:
+                    extra = await run_command([
+                        str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+                        "--model", str(QWEN_MODEL), "--image", str(image_path),
+                        "--prompt", qwen_parts_prompt(repeated), "--max-tokens", "420",
+                        "--temperature", "0", "--no-verbose",
+                    ], timeout=60)
+                    if extra.returncode == 0:
+                        locations = extract_json(extra.stdout).get("regions", [])
+                        by_id = {item["id"]: item for item in repeated}
+                        for item in locations:
+                            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                                continue
+                            target = by_id.get(item["id"])
+                            if target and isinstance(item.get("parts"), list):
+                                # Use the same box validation and deduplication as the primary model output.
+                                merged = normalize_proposals({"regions": [{**target, "parts": item["parts"]}]})[0]
+                                if merged.get("parts"):
+                                    target["parts"] = merged["parts"]
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass  # The first location remains playable.
             proposal_path = image_path.parent / "proposals.json"
             proposal_path.write_text(json.dumps({
                 "artwork": artwork,
@@ -503,12 +608,29 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                 "regions": proposals,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            job.update(stage="segment", message=f"Defining {len(proposals)} interactive regions…", progress=45)
+            sam3_dir = image_path.parent / "sam3"
+            sam3_ready = False
+            if (SAM3_MODEL / "model.safetensors").is_file():
+                job.update(stage="segment", message="Finding matching shapes with SAM 3…", progress=45)
+                try:
+                    sam3 = await run_command([
+                        str(QWEN_PYTHON), str(SAM3_SCRIPT),
+                        "--image", str(image_path), "--proposals", str(proposal_path),
+                        "--model", str(SAM3_MODEL), "--output", str(sam3_dir),
+                    ], timeout=120)
+                    sam3_ready = sam3.returncode == 0 and (sam3_dir / "regions.json").is_file()
+                    if sam3.returncode:
+                        (image_path.parent / "sam3-error.log").write_text(sam3.stderr, encoding="utf-8")
+                except (OSError, subprocess.TimeoutExpired):
+                    pass  # SAM 2.1 can complete the analysis without SAM 3.
+
+            job.update(stage="segment", message="Defining interactive regions…", progress=60)
             result_dir = image_path.parent / "result"
             sam = await run_command([
                 str(SAM_PYTHON), str(SAM_SCRIPT),
                 "--image", str(image_path), "--proposals", str(proposal_path),
                 "--output", str(result_dir),
+                *(["--sam3", str(sam3_dir)] if sam3_ready else []),
             ], timeout=360)
             if sam.returncode != 0:
                 raise RuntimeError(sam.stderr.strip()[-900:] or "Mask generation failed")
@@ -518,7 +640,7 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
             job.update(stage="music", message="Preparing the algorithmic music system…", progress=92)
             processed_image = manifest.get("processed_image", "artwork.png")
             music_plan = derive_music_plan(
-                emotion_profile,
+                gems_profile,
                 result_dir / processed_image,
                 statement,
             )
@@ -528,7 +650,7 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                 "status": "ready",
                 "artist_statement": statement,
                 "music_plan": music_plan,
-                "emotion_profile": emotion_profile,
+                "gems_profile": gems_profile,
             })
             for region in manifest["regions"]:
                 region["visual_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['visual_mask']}"
@@ -657,25 +779,27 @@ async def api_test_external_output(protocol: str) -> JSONResponse:
 async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
     event_clients.add(websocket)
-    await websocket.send_json({"type": "connected", "message": "Street Art control stream ready"})
     try:
+        await websocket.send_json({"type": "connected", "message": "Street Art control stream ready"})
         while True:
-            message = await websocket.receive_json()
-            if message.get("type") in {"pointer_state", "scan_state"}:
+            try:
+                message = await websocket.receive_json()
+            except ValueError:
+                continue
+            if isinstance(message, dict) and message.get("type") in ("pointer_state", "scan_state"):
                 latest_state.clear()
                 latest_state.update(message)
                 await asyncio.to_thread(external_output.process, message)
-                stale: list[WebSocket] = []
-                for client in event_clients:
+                for client in tuple(event_clients):
                     if client is websocket:
                         continue
                     try:
                         await client.send_json(message)
                     except Exception:
-                        stale.append(client)
-                for client in stale:
-                    event_clients.discard(client)
+                        event_clients.discard(client)
     except WebSocketDisconnect:
+        pass
+    finally:
         event_clients.discard(websocket)
 
 

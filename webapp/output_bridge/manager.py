@@ -110,6 +110,7 @@ PERFORMANCE_CCS: dict[str, int] = {
     "brightness": 74,
     "reverb": 91,
     "chorus": 93,
+    "delay": 94,
 }
 
 

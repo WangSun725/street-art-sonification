@@ -23,6 +23,7 @@ const analysisMessage = $("#analysisMessage");
 const regionList = $("#regionList");
 const regionBadge = $("#regionBadge");
 const outputJson = $("#outputJson");
+const outputSection = outputJson.closest("[data-collapsible]");
 const maskToggle = $("#maskToggle");
 const soundToggle = $("#soundToggle");
 const volumeSlider = $("#volumeSlider");
@@ -49,6 +50,8 @@ const eyeToggle = $("#eyeToggle");
 const eyeCalibrate = $("#eyeCalibrate");
 const eyeStatus = $("#eyeStatus");
 const eyeVideo = $("#eyeVideo");
+const gazeStability = $("#gazeStability");
+const gazeStabilityValue = $("#gazeStabilityValue");
 const gazeCursor = $("#gazeCursor");
 const calibrationOverlay = $("#calibrationOverlay");
 const calibrationTarget = $("#calibrationTarget");
@@ -210,22 +213,28 @@ const INSTRUMENT_PREFERENCES = {
   detail: ["keys_mallet", "counter_synth", "lead_synth", "guitar"],
 };
 
-const DEFAULT_EMOTION = {
-  label: "warm_reflective",
-  valence: .55,
-  arousal: .45,
-  tension: .35,
-  warmth: .6,
-  roughness: .3,
-  source: "combined-image-and-statement",
+const GEMS_LABELS = {
+  wonder: "Wonder",
+  transcendence: "Transcendence",
+  tenderness: "Tenderness",
+  nostalgia: "Nostalgia",
+  peacefulness: "Peacefulness",
+  power: "Power",
+  joyful_activation: "Joyful Activation",
+  tension: "Tension",
+  sadness: "Sadness",
 };
-
-const EMOTION_LABELS = {
-  warm_reflective: "Warm / Reflective",
-  bright_hopeful: "Bright / Hopeful",
-  dark_melancholic: "Dark / Melancholic",
-  tense_defiant: "Tense / Defiant",
-  energetic_celebratory: "Energetic / Celebratory",
+const GEMS_DIMENSIONS = Object.keys(GEMS_LABELS);
+const DEFAULT_GEMS_WEIGHTS = {
+  wonder: .12,
+  transcendence: .08,
+  tenderness: .10,
+  nostalgia: .10,
+  peacefulness: .20,
+  power: .10,
+  joyful_activation: .12,
+  tension: .10,
+  sadness: .08,
 };
 
 function clampUnit(value, fallback = 0) {
@@ -233,18 +242,152 @@ function clampUnit(value, fallback = 0) {
   return Math.max(0, Math.min(1, Number.isFinite(number) ? number : fallback));
 }
 
-function normalizeEmotionProfile(value) {
+function normalizeGemsWeights(value) {
   const source = value && typeof value === "object" ? value : {};
-  const label = EMOTION_LABELS[source.label] ? source.label : DEFAULT_EMOTION.label;
+  const values = Object.fromEntries(GEMS_DIMENSIONS.map((name) => [name, clampUnit(source[name], 0)]));
+  let total = GEMS_DIMENSIONS.reduce((sum, name) => sum + values[name], 0);
+  if (total <= 0) {
+    for (const name of GEMS_DIMENSIONS) values[name] = DEFAULT_GEMS_WEIGHTS[name];
+    total = GEMS_DIMENSIONS.reduce((sum, name) => sum + values[name], 0);
+  }
+  return Object.fromEntries(GEMS_DIMENSIONS.map((name) => [name, Number((values[name] / total).toFixed(6))]));
+}
+
+function gemsHigherOrder(weights) {
   return {
-    label,
-    valence: clampUnit(source.valence, DEFAULT_EMOTION.valence),
-    arousal: clampUnit(source.arousal, DEFAULT_EMOTION.arousal),
-    tension: clampUnit(source.tension, DEFAULT_EMOTION.tension),
-    warmth: clampUnit(source.warmth, DEFAULT_EMOTION.warmth),
-    roughness: clampUnit(source.roughness, DEFAULT_EMOTION.roughness),
-    source: source.source || DEFAULT_EMOTION.source,
+    sublimity: Number((weights.wonder + weights.transcendence + weights.tenderness + weights.nostalgia + weights.peacefulness).toFixed(6)),
+    vitality: Number((weights.power + weights.joyful_activation).toFixed(6)),
+    unease: Number((weights.tension + weights.sadness).toFixed(6)),
   };
+}
+
+function normalizeGemsProfile(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const weights = normalizeGemsWeights(source.weights);
+  const ranked = [...GEMS_DIMENSIONS].sort((a, b) => weights[b] - weights[a]);
+  const image = source.image && typeof source.image === "object" ? source.image : {};
+  const statement = source.statement && typeof source.statement === "object" ? source.statement : {};
+  return {
+    framework: "GEMS-9",
+    weights,
+    dominant: GEMS_LABELS[source.dominant] ? source.dominant : ranked[0],
+    secondary: GEMS_LABELS[source.secondary] ? source.secondary : ranked[1],
+    higher_order: gemsHigherOrder(weights),
+    image: {
+      weights: normalizeGemsWeights(image.weights),
+      evidence: String(image.evidence || "GEMS-9 estimate based on visible artwork features."),
+    },
+    statement: {
+      weights: normalizeGemsWeights(statement.weights),
+      evidence: String(statement.evidence || "GEMS-9 estimate based on the Artist Statement."),
+    },
+    combination: source.combination || { image: .45, statement: .55 },
+    rationale: String(source.rationale || "Image and statement profiles were combined deterministically."),
+    source: source.source || "qwen3-vl-separate-image-and-statement-gems9",
+  };
+}
+
+function gemsProfileName(profile = state.gems) {
+  const dominant = GEMS_LABELS[profile?.dominant] || "Peacefulness";
+  const secondary = GEMS_LABELS[profile?.secondary] || "Wonder";
+  return `${dominant} + ${secondary}`;
+}
+
+function gemsControlFeatures(profile = state.gems) {
+  const weights = profile?.weights || DEFAULT_GEMS_WEIGHTS;
+  const activationWeights = {
+    wonder: .62, transcendence: .45, tenderness: .25, nostalgia: .32, peacefulness: .15,
+    power: .90, joyful_activation: .98, tension: .85, sadness: .20,
+  };
+  const activation = GEMS_DIMENSIONS.reduce(
+    (sum, name) => sum + weights[name] * (activationWeights[name] || 0),
+    0,
+  );
+  return {
+    activation: clampUnit(activation),
+    sublimity: clampUnit(profile?.higher_order?.sublimity),
+    vitality: clampUnit((weights.power + weights.joyful_activation) * 2.8),
+    unease: clampUnit((weights.tension + weights.sadness) * 2.8),
+    serenity: clampUnit((weights.peacefulness + weights.tenderness + weights.nostalgia) * 2.35),
+    radiance: clampUnit((weights.wonder + weights.joyful_activation + weights.power) * 2.25),
+    power: clampUnit(weights.power * 5),
+    tension: clampUnit(weights.tension * 5),
+    sadness: clampUnit(weights.sadness * 5),
+  };
+}
+
+// Each instrument has its own spatial response to all nine GEMS dimensions.
+// Arrays follow GEMS_DIMENSIONS order and remain normalized 0-1 effect sends.
+const ROLE_GEMS_EFFECTS = {
+  lead_synth: {
+    reverb: [.55, .75, .45, .65, .42, .25, .32, .18, .62],
+    chorus: [.4, .62, .28, .58, .36, .16, .28, .45, .55],
+    delay: [.36, .48, .22, .4, .18, .2, .32, .36, .32],
+  },
+  counter_synth: {
+    reverb: [.62, .8, .52, .7, .55, .22, .38, .32, .68],
+    chorus: [.48, .7, .35, .64, .46, .18, .34, .52, .62],
+    delay: [.52, .68, .34, .58, .32, .28, .48, .56, .5],
+  },
+  drums: {
+    reverb: [.22, .35, .18, .3, .16, .12, .18, .25, .3],
+    chorus: [.08, .12, .06, .1, .05, .04, .06, .14, .08],
+    delay: [.16, .28, .1, .22, .08, .08, .14, .24, .18],
+  },
+  bass: {
+    reverb: [.18, .3, .2, .28, .18, .08, .12, .12, .26],
+    chorus: [.14, .28, .16, .3, .18, .08, .12, .24, .26],
+    delay: [.1, .18, .08, .16, .06, .06, .1, .14, .12],
+  },
+  guitar: {
+    reverb: [.48, .68, .46, .66, .5, .22, .3, .3, .64],
+    chorus: [.35, .58, .34, .62, .44, .16, .26, .4, .58],
+    delay: [.32, .52, .24, .48, .22, .16, .3, .38, .4],
+  },
+  pad: {
+    reverb: [.72, .92, .72, .86, .82, .42, .58, .64, .84],
+    chorus: [.62, .82, .58, .78, .68, .35, .52, .76, .74],
+    delay: [.38, .58, .3, .5, .3, .2, .34, .44, .42],
+  },
+  strings: {
+    reverb: [.68, .9, .7, .84, .78, .4, .54, .58, .86],
+    chorus: [.58, .8, .54, .76, .62, .3, .46, .72, .78],
+    delay: [.3, .48, .24, .42, .24, .16, .28, .4, .38],
+  },
+  keys_mallet: {
+    reverb: [.48, .68, .42, .62, .5, .2, .3, .34, .58],
+    chorus: [.26, .42, .22, .4, .28, .12, .2, .34, .36],
+    delay: [.38, .58, .28, .5, .24, .2, .42, .48, .42],
+  },
+  percussion_texture: {
+    reverb: [.5, .72, .38, .62, .48, .2, .36, .58, .56],
+    chorus: [.36, .56, .28, .5, .34, .14, .3, .64, .46],
+    delay: [.48, .7, .32, .58, .28, .22, .5, .72, .52],
+  },
+};
+
+function roleGemsEffects(role) {
+  const profile = ROLE_GEMS_EFFECTS[role] || ROLE_GEMS_EFFECTS.lead_synth;
+  const weights = state.gems?.weights || DEFAULT_GEMS_WEIGHTS;
+  const blend = (values) => GEMS_DIMENSIONS.reduce(
+    (sum, name, index) => sum + (weights[name] || 0) * values[index],
+    0,
+  );
+  return {
+    reverb: clampUnit(blend(profile.reverb)),
+    chorus: clampUnit(blend(profile.chorus)),
+    delay: clampUnit(blend(profile.delay)),
+  };
+}
+
+function renderGemsProfile() {
+  const weights = state.gems.weights;
+  const dominant = state.gems.dominant;
+  const secondary = state.gems.secondary;
+  const percent = (name) => `${Math.round((weights[name] || 0) * 100)}%`;
+  $("#gemsSummary").textContent = `${GEMS_LABELS[dominant]} ${percent(dominant)} · ${GEMS_LABELS[secondary]} ${percent(secondary)}`;
+  $("#gemsImageEvidence").textContent = state.gems.image.evidence;
+  $("#gemsStatementEvidence").textContent = state.gems.statement.evidence;
 }
 
 function assignInstrumentRoles(regions) {
@@ -271,7 +414,7 @@ const state = {
   masksVisible: true,
   analyzing: false,
   music: { bpm: 72, root: "D", mode: "dorian" },
-  emotion: { ...DEFAULT_EMOTION },
+  gems: normalizeGemsProfile(null),
   harmony: { signature: null, plan: null },
   musicTimeline: {
     duration: MAX_MUSIC_DURATION,
@@ -301,6 +444,7 @@ const state = {
     tracker: null,
     smoothX: null,
     smoothY: null,
+    lastSmoothAt: 0,
     lastResultAt: 0,
     calibrationIndex: 0,
     calibrationReady: false,
@@ -708,11 +852,12 @@ function musicEventForRegion(region, nx, ny, beatPosition, speed = 0, intensity 
 function performanceControls(region, visual, x, speed, mix) {
   const role = region.instrument?.id || "lead_synth";
   const source = visual || fallbackRegionVisual(region);
-  const emotion = state.emotion || DEFAULT_EMOTION;
+  const gems = gemsControlFeatures();
+  const roleEffects = roleGemsEffects(role);
   const brightness = clampUnit(source.brightness, .5);
   const saturation = clampUnit(source.saturation, .35);
   const texture = clampUnit(source.texture, .25);
-  const movement = clampUnit(clampUnit(speed) * .58 + emotion.arousal * .42);
+  const movement = clampUnit(clampUnit(speed) * .58 + gems.activation * .42);
   const sustained = role === "pad" || role === "strings";
   const plucked = role === "guitar" || role === "keys_mallet";
   const rhythmic = role === "drums" || role === "percussion_texture";
@@ -723,22 +868,25 @@ function performanceControls(region, visual, x, speed, mix) {
     pan: Number(clampUnit(x, .5).toFixed(4)),
     expression: Number(clampUnit(mix, 1).toFixed(4)),
     harmonicIntensity: Number(clampUnit(
-      .12 + emotion.tension * .3 + emotion.roughness * .24 + texture * .2 + saturation * .12,
+      .10 + gems.unease * .28 + gems.power * .12 + texture * .26 + saturation * .12,
     ).toFixed(4)),
     release: Number(clampUnit(
-      .12 + (1 - emotion.arousal) * .28 + emotion.warmth * .24 + (sustained ? .3 : 0) + (plucked ? -.08 : 0),
+      .10 + (1 - gems.activation) * .18 + gems.sublimity * .25 + gems.sadness * .10 + (sustained ? .3 : 0) + (plucked ? -.08 : 0),
     ).toFixed(4)),
     attack: Number(clampUnit(
-      .06 + (1 - emotion.arousal) * .34 + (sustained ? .36 : 0) + (rhythmic || plucked ? -.08 : 0),
+      .05 + (1 - gems.activation) * .24 + gems.serenity * .16 + (sustained ? .36 : 0) + (rhythmic || plucked ? -.08 : 0),
     ).toFixed(4)),
     brightness: Number(clampUnit(
-      .12 + brightness * .45 + emotion.valence * .2 + saturation * .08 + movement * .1,
+      .10 + brightness * .45 + gems.radiance * .22 + saturation * .08 + movement * .1,
     ).toFixed(4)),
     reverb: Number(clampUnit(
-      .08 + emotion.warmth * .32 + (1 - emotion.arousal) * .18 + (sustained ? .22 : 0),
+      .04 + roleEffects.reverb * .72 + gems.sublimity * .1,
     ).toFixed(4)),
     chorus: Number(clampUnit(
-      .03 + emotion.warmth * .12 + (sustained ? .38 : 0) + (role === "counter_synth" || role === "guitar" ? .09 : 0),
+      .02 + roleEffects.chorus * .76 + gems.serenity * .08,
+    ).toFixed(4)),
+    delay: Number(clampUnit(
+      .02 + roleEffects.delay * .78 + movement * .08,
     ).toFixed(4)),
   };
 }
@@ -826,7 +974,7 @@ function resetPointerMusicTimeline() {
 }
 
 async function ensurePerformanceOutput() {
-  if (state.outputMode === "web" && !soundEngine.enabled) await soundEngine.toggle();
+  if (state.outputMode === "web" && !soundEngine.enabled) await soundEngine.setEnabled(true);
   if (state.mode === "pointer" && (state.outputMode === "midi" || soundEngine.enabled)) {
     startPointerMusicTimeline();
   }
@@ -1170,9 +1318,9 @@ function sampleVisualAt(nx, ny) {
   };
 }
 
-function buildScanProfile(hitData, width, height, imagePixels) {
+function buildScanProfile(hitData, width, height, imagePixels, fineDetail = false) {
   const profile = [];
-  const yStep = Math.max(1, Math.floor(height / 260));
+  const yStep = fineDetail ? 1 : Math.max(1, Math.floor(height / 260));
   const halfSpan = Math.max(1, Math.floor(width / SCAN_PROFILE_BINS / 2));
   for (let bin = 0; bin < SCAN_PROFILE_BINS; bin++) {
     const centerX = Math.min(width - 1, Math.round(bin / (SCAN_PROFILE_BINS - 1) * (width - 1)));
@@ -1290,7 +1438,7 @@ async function prepareMask(region, imagePixels) {
     hitCanvas,
     hitContext,
     hitData,
-    scanProfile: buildScanProfile(hitData, hitCanvas.width, hitCanvas.height, imagePixels),
+    scanProfile: buildScanProfile(hitData, hitCanvas.width, hitCanvas.height, imagePixels, region.fine_detail),
     outlineCanvas,
   };
 }
@@ -1367,7 +1515,13 @@ function renderRegionList() {
     button.style.setProperty("--chip-color", rgb(region));
     button.dataset.region = region.id;
     button.setAttribute("aria-pressed", "false");
-    button.innerHTML = `<i></i><span><strong>${region.label}</strong><small>${region.instrument?.label || "Lead Synth"} · CH ${region.instrument?.midiChannel || 1}</small></span>`;
+    const description = document.createElement("span");
+    const name = document.createElement("strong");
+    const instrument = document.createElement("small");
+    name.textContent = region.label;
+    instrument.textContent = `${region.instrument?.label || "Lead Synth"} · CH ${region.instrument?.midiChannel || 1}`;
+    description.append(name, instrument);
+    button.append(document.createElement("i"), description);
     button.title = region.instrument?.behavior || "Beat-synced melody";
     button.addEventListener("click", async () => {
       if (state.mode === "scan" && state.scan.playing) {
@@ -1410,7 +1564,8 @@ async function loadAnalysis(manifest) {
   state.imagePixels = imagePixels;
   state.regions = assignInstrumentRoles(loadedRegions);
   resetPointerMusicTimeline();
-  state.emotion = normalizeEmotionProfile(manifest.emotion_profile);
+  state.gems = normalizeGemsProfile(manifest.gems_profile);
+  renderGemsProfile();
   const musicPlan = manifest.music_plan || null;
   if (musicPlan) {
     musicBpm.value = String(Math.max(40, Math.min(200, Math.round(Number(musicPlan.bpm) || 72))));
@@ -1418,7 +1573,7 @@ async function loadAnalysis(manifest) {
     musicMode.value = MUSIC_MODES[musicPlan.mode] ? musicPlan.mode : "dorian";
     applyMusicSettings(false);
   }
-  $("#musicSourceStatus").textContent = `${EMOTION_LABELS[state.emotion.label]} · ${harmonyPlanSummary()}`;
+  $("#musicSourceStatus").textContent = `GEMS-9 · ${gemsProfileName()} · ${harmonyPlanSummary()}`;
   $("#thumbImage").src = manifest.image_url;
   fitCanvas();
   renderRegionList();
@@ -1454,10 +1609,25 @@ function edgeProximity(region, nx, ny) {
 }
 
 function regionAt(nx, ny) {
-  for (let index = state.regions.length - 1; index >= 0; index--) {
-    if (maskValue(state.regions[index], nx, ny)) return state.regions[index];
+  let best = null;
+  let bestScore = -Infinity;
+  for (let index = 0; index < state.regions.length; index++) {
+    const region = state.regions[index];
+    if (!maskValue(region, nx, ny)) continue;
+    // New analyses use mutually exclusive masks, so there is normally one
+    // candidate. This specificity score is a compatibility fallback for old
+    // saved analyses whose dilated masks overlap: a precise region should not
+    // be hidden by a full-canvas wall or fill.
+    const area = Math.max(.0001, Math.min(1, Number(region.area_ratio || .5)));
+    const specificity = 1 - Math.sqrt(area);
+    const confidence = Math.max(0, Math.min(1, Number(region.sam_scores?.[0] || 0)));
+    const score = specificity * 2 + confidence * .25 + index * .0001;
+    if (score > bestScore) {
+      best = region;
+      bestScore = score;
+    }
   }
-  return null;
+  return best;
 }
 
 function regionAtGaze(nx, ny) {
@@ -1474,15 +1644,28 @@ function regionAtGaze(nx, ny) {
   for (let index = 0; index < state.regions.length; index++) {
     const region = state.regions[index];
     let hits = 0;
+    let nearest = Infinity;
     for (const [ox, oy] of offsets) {
       const px = nx + ox * radius / rect.width;
       const py = ny + oy * radius / rect.height;
-      if (px >= 0 && px <= 1 && py >= 0 && py <= 1 && maskValue(region, px, py)) hits++;
+      if (px >= 0 && px <= 1 && py >= 0 && py <= 1 && maskValue(region, px, py)) {
+        hits++;
+        nearest = Math.min(nearest, Math.hypot(ox, oy));
+      }
     }
-    const centerBonus = maskValue(region, nx, ny) ? 1.8 : 0;
-    const specificity = Math.max(0, 1 - Number(region.area_ratio || .5)) * .45;
-    const score = hits + centerBonus + specificity + index * .0001;
-    if (hits >= 2 && score > bestScore) {
+    if (!hits) continue;
+    const centerBonus = maskValue(region, nx, ny) ? 3.6 : 0;
+    const area = Math.max(.0001, Math.min(1, Number(region.area_ratio || .5)));
+    const specificity = 1 - Math.sqrt(area);
+    const proximity = 1 - Math.min(1, nearest);
+    const coverage = hits / offsets.length;
+    const confidence = Math.max(0, Math.min(1, Number(region.sam_scores?.[0] || 0)));
+    // Raw hit count previously allowed a large background mask to win every
+    // gaze sample. Centre ownership and proximity now dominate; coverage has
+    // only a small stabilising influence.
+    const score = centerBonus + proximity * 2.2 + specificity * 1.6
+      + coverage * .45 + confidence * .2 + index * .0001;
+    if (score > bestScore) {
       best = region;
       bestScore = score;
     }
@@ -1531,7 +1714,7 @@ function scanRegionsAt(nx) {
       const intensity = Math.min(1, Math.sqrt(sample.coverage * 3.2));
       return { region, ...sample, intensity, score: intensity + (specificity[region.type] || 0) };
     })
-    .filter((item) => item.coverage > .006)
+    .filter((item) => item.coverage > (item.region.fine_detail ? .0015 : .006))
     .sort((a, b) => b.score - a.score || b.texture - a.texture);
 }
 
@@ -1745,7 +1928,7 @@ function outputPayload() {
     } : null,
     music: {
       source: "realtime-algorithm",
-      controlProtocol: "shared-normalized-v1",
+      controlProtocol: "shared-normalized-v3-gems9-matrix",
       masterDurationSeconds: MAX_MUSIC_DURATION,
       playbackSeconds: Number((scanning ? state.scan.seconds : pointerMusicSeconds()).toFixed(3)),
       bpm: state.music.bpm,
@@ -1758,9 +1941,9 @@ function outputPayload() {
         contrast: ensureHarmonyPlan().contrast.name,
         selection: "automatic-from-artwork",
       },
-      emotionProfile: {
-        ...state.emotion,
-        displayName: EMOTION_LABELS[state.emotion.label] || "Warm / Reflective",
+      gemsProfile: {
+        ...state.gems,
+        displayName: gemsProfileName(),
       },
       beatPosition: Number(musicBeatPosition(scanning).toFixed(3)),
       beatPhase: Number((musicBeatPosition(scanning) % 1).toFixed(3)),
@@ -1770,13 +1953,19 @@ function outputPayload() {
   };
 }
 
+function renderOutputPreview() {
+  if (state.setupComplete && !outputSection.classList.contains("section-collapsed") && state.lastOutput) {
+    outputJson.textContent = JSON.stringify(state.lastOutput, null, 2);
+  }
+}
+
 function publishOutput(force = false) {
   const now = performance.now();
   if (!force && now - state.lastSentAt < 45) return;
   state.lastSentAt = now;
   const payload = outputPayload();
   state.lastOutput = payload;
-  outputJson.textContent = JSON.stringify(payload, null, 2);
+  renderOutputPreview();
   $("#xValue").textContent = payload.normalized.x.toFixed(3);
   $("#yValue").textContent = payload.normalized.y.toFixed(3);
   $("#speedValue").textContent = payload.speed.toFixed(2);
@@ -1799,6 +1988,7 @@ function publishOutput(force = false) {
 class SoundEngine {
   constructor() {
     this.enabled = false;
+    this.audioRequested = false;
     this.outputLevel = Number(volumeSlider.value) / 100;
     this.context = null;
     this.oscillator = null;
@@ -1835,11 +2025,33 @@ class SoundEngine {
       this.masterGain.gain.setTargetAtTime(gain, this.context.currentTime, .025);
     }
   }
-  async toggle() {
-    if (!this.context) await this.setup();
-    else if (this.setupPromise) await this.setupPromise;
-    if (this.context.state === "suspended") await this.context.resume();
-    this.enabled = !this.enabled;
+  toggle() {
+    return this.setEnabled(!this.audioRequested);
+  }
+  async setEnabled(enabled) {
+    this.audioRequested = enabled;
+    if (this.enabled === enabled) return this.enabled;
+    if (enabled) {
+      try {
+        const ready = this.setup();
+        // Resume while the browser still has the user's click, even if loading
+        // the worklet module takes longer.
+        const context = this.context;
+        await Promise.all([
+          ready,
+          context?.state === "suspended" ? context.resume() : undefined,
+        ]);
+      } catch (error) {
+        if (this.audioRequested) {
+          this.audioRequested = false;
+          $("#outputModeStatus").textContent = "Web Audio unavailable · press Sound to retry";
+          showToast(`Could not start Web Audio: ${error.message || error}`);
+        }
+        return this.enabled;
+      }
+      if (!this.audioRequested || this.enabled) return this.enabled;
+    }
+    this.enabled = enabled;
     soundToggle.classList.toggle("active", this.enabled);
     soundToggle.setAttribute("aria-pressed", String(this.enabled));
     if (!this.enabled) this.stopScan();
@@ -1852,15 +2064,24 @@ class SoundEngine {
     if (!this.enabled) {
       this.fmNode?.port.postMessage({ type: "clear" });
     }
+    return this.enabled;
   }
-  async setEnabled(enabled) {
-    if (this.enabled === enabled) return;
-    await this.toggle();
-  }
-  async setup() {
+  setup() {
     if (this.setupPromise) return this.setupPromise;
-    this.setupPromise = this.setupAudioGraph();
-    await this.setupPromise;
+    if (this.fmNode) return;
+    this.setupPromise = this.setupAudioGraph().catch(async (error) => {
+      const context = this.context;
+      this.context = null;
+      this.fmNode = null;
+      this.masterGain = null;
+      if (context && context.state !== "closed") {
+        try { await context.close(); } catch (_) { /* The failed context may already be closed. */ }
+      }
+      throw error;
+    }).finally(() => {
+      this.setupPromise = null;
+    });
+    return this.setupPromise;
   }
   async setupAudioGraph() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1883,7 +2104,7 @@ class SoundEngine {
     this.compressor.attack.value = .003;
     this.compressor.release.value = .18;
     this.delay = this.context.createDelay(1.2);
-    this.delay.delayTime.value = .285;
+    this.delay.delayTime.value = Math.max(.12, Math.min(.72, this.beatSeconds() * .75));
     this.delayFeedback = this.context.createGain();
     this.delayFeedback.gain.value = .24;
     this.delayWet = this.context.createGain();
@@ -1900,7 +2121,7 @@ class SoundEngine {
     convolver.buffer = impulse;
     this.reverbWet = this.context.createGain();
     this.reverbWet.gain.value = .12;
-    await this.context.audioWorklet.addModule("/static/fm-worklet.js?v=20261029-unified1");
+    await this.context.audioWorklet.addModule("/static/fm-worklet.js?v=stability1");
     this.fmNode = new AudioWorkletNode(this.context, "street-art-fm", {
       numberOfInputs: 0,
       numberOfOutputs: 1,
@@ -1912,7 +2133,6 @@ class SoundEngine {
     this.delay.connect(this.delayFeedback).connect(this.delay);
     this.musicBus.connect(convolver).connect(this.reverbWet).connect(this.masterGain);
     this.masterGain.connect(this.compressor).connect(this.context.destination);
-    $("#outputModeStatus").textContent = "4-operator FM engine ready";
   }
   beatSeconds() {
     return 60 / state.music.bpm;
@@ -1972,16 +2192,36 @@ class SoundEngine {
     });
   }
   applyControlFrame(events) {
-    if (!this.context || !events.length) return;
-    const average = (name, fallback) => events.reduce(
-      (sum, event) => sum + clampUnit(event.controls?.[name], fallback),
-      0,
-    ) / events.length;
+    if (!this.context) return;
+    const average = (name, fallback) => events.length
+      ? events.reduce(
+        (sum, event) => sum + clampUnit(event.controls?.[name], fallback),
+        0,
+      ) / events.length
+      : fallback;
     const now = this.context.currentTime;
-    // These are the same reverb and movement values sent as MIDI CC91 and
-    // CC1. Only the renderer changes; the musical/control state does not.
-    this.reverbWet?.gain.setTargetAtTime(.035 + average("reverb", .25) * .24, now, .06);
-    this.delayWet?.gain.setTargetAtTime(.04 + average("movement", .4) * .18, now, .06);
+    // These are the same reverb, delay, and movement values sent as MIDI CC91,
+    // CC94, and CC1. The wet returns duck while an active region is sounding,
+    // then bloom into the spaces between gestures. Delay follows a dotted
+    // eighth at the shared BPM, so Web Audio and MIDI stay on one grid.
+    const activity = events.length
+      ? Math.max(...events.map((event) => clampUnit(event.controls?.expression, event.mix ?? 1)))
+      : 0;
+    const duck = 1 - activity * .42;
+    const reverb = .035 + average("reverb", .25) * .27 * duck;
+    const delay = .025 + average("delay", .25) * .24 * (.72 + duck * .28);
+    this.reverbWet?.gain.setTargetAtTime(reverb, now, activity ? .025 : .22);
+    this.delayWet?.gain.setTargetAtTime(delay, now, activity ? .035 : .16);
+    this.delay?.delayTime.setTargetAtTime(
+      Math.max(.12, Math.min(.72, this.beatSeconds() * .75)),
+      now,
+      .045,
+    );
+    this.delayFeedback?.gain.setTargetAtTime(
+      .12 + average("delay", .25) * .25,
+      now,
+      .08,
+    );
   }
   update(payload) {
     if (!this.enabled) return;
@@ -2028,6 +2268,7 @@ class SoundEngine {
         kind: event.eventKind || "note",
         visual: { brightness, saturation, texture, hue },
         controls,
+        gemsWeights: state.gems.weights,
       });
     });
   }
@@ -2418,7 +2659,6 @@ function setScanPosition(seconds, forcePublish = false) {
   const current = formatTime(state.scan.seconds);
   scanTime.textContent = `${current} / ${formatTime(state.scan.duration)}`;
   $("#canvasScanTime").textContent = current;
-  drawCanvas();
   publishOutput(forcePublish);
 }
 
@@ -2680,7 +2920,71 @@ function updateEyeButtons() {
   mouseSource.classList.toggle("active", !active);
   mouseSource.setAttribute("aria-pressed", String(!active));
   eyeCalibrate.disabled = !state.eye.ready || !state.eye.active;
+  gazeStability.disabled = !active;
   eyeVideo.hidden = !active;
+}
+
+function gazeStabilityLabel(value) {
+  if (value < 34) return "Responsive";
+  if (value > 66) return "Stable";
+  return "Balanced";
+}
+
+function updateGazeStabilityLabel() {
+  const label = gazeStabilityLabel(Number(gazeStability.value));
+  gazeStabilityValue.textContent = label;
+  gazeStability.setAttribute("aria-valuetext", label);
+}
+
+function gazeFrictionBase() {
+  const friction = Math.max(0, Math.min(1, Number(gazeStability.value) / 100));
+  return {
+    friction,
+    windowSize: 3 + 2 * Math.round(friction * 6),
+    tau: .05 * Math.pow(24, friction),
+  };
+}
+
+function adaptiveGazeDeadZone(friction, targetX, targetY, canvasRect) {
+  if (!canvasRect.width || !canvasRect.height) return 0;
+  const minDimension = Math.min(canvasRect.width, canvasRect.height);
+  let deadZone = Math.min(80 * friction, minDimension * .08);
+  const nx = (targetX - canvasRect.left) / canvasRect.width;
+  const ny = (targetY - canvasRect.top) / canvasRect.height;
+  if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1) {
+    const targetRegion = regionAtGaze(nx, ny);
+    if (targetRegion) {
+      const areaRatio = Math.max(.0001, Math.min(1, Number(targetRegion.area_ratio || .5)));
+      const equivalentRadius = Math.sqrt(areaRatio * canvasRect.width * canvasRect.height / Math.PI);
+      // A small semantic region gets a much smaller dead zone, so stability
+      // never makes it impossible to reach a detail inside a larger region.
+      deadZone = Math.min(deadZone, Math.max(3, equivalentRadius * .22));
+    }
+  }
+  return deadZone;
+}
+
+function smoothGazePoint(targetX, targetY, now, canvasRect, tau, friction) {
+  if (state.eye.smoothX === null || state.eye.smoothY === null) {
+    state.eye.smoothX = targetX;
+    state.eye.smoothY = targetY;
+    state.eye.lastSmoothAt = now;
+    return;
+  }
+  const elapsed = Math.min(.25, Math.max(0, (now - state.eye.lastSmoothAt) / 1000));
+  state.eye.lastSmoothAt = now;
+  const dx = targetX - state.eye.smoothX;
+  const dy = targetY - state.eye.smoothY;
+  const distance = Math.hypot(dx, dy);
+  const deadZone = adaptiveGazeDeadZone(friction, targetX, targetY, canvasRect);
+  // Small involuntary movements creep slowly; deliberate larger movements
+  // progressively catch up faster, avoiding a permanently sluggish cursor.
+  const effectiveTau = distance <= deadZone
+    ? tau * 6
+    : tau / (1 + (distance - deadZone) / 150);
+  const alpha = 1 - Math.exp(-elapsed / Math.max(.001, effectiveTau));
+  state.eye.smoothX += dx * alpha;
+  state.eye.smoothY += dy * alpha;
 }
 
 function createEyeTrackerWithoutGlobalClickLearning(webcamClient) {
@@ -2706,23 +3010,19 @@ function gazeToArtwork(result) {
     gazeCursor.hidden = true;
     return;
   }
+  const friction = gazeFrictionBase();
   state.eye.rawHistory.push([rawX, rawY]);
-  if (state.eye.rawHistory.length > 5) state.eye.rawHistory.shift();
+  while (state.eye.rawHistory.length > friction.windowSize) state.eye.rawHistory.shift();
   const filteredRawX = median(state.eye.rawHistory.map((point) => point[0]));
   const filteredRawY = median(state.eye.rawHistory.map((point) => point[1]));
   const calibrated = applyEyeCalibration(filteredRawX, filteredRawY);
   const targetX = calibrated.x * window.innerWidth;
   const targetY = calibrated.y * window.innerHeight;
-  const normalizedDistance = state.eye.smoothX === null ? 1 : Math.hypot(
-    (targetX - state.eye.smoothX) / Math.max(1, window.innerWidth),
-    (targetY - state.eye.smoothY) / Math.max(1, window.innerHeight),
-  );
-  const smoothing = state.eye.smoothX === null ? 1 : Math.max(.12, Math.min(.52, .12 + normalizedDistance * 3.2));
-  state.eye.smoothX = state.eye.smoothX === null ? targetX : state.eye.smoothX + (targetX - state.eye.smoothX) * smoothing;
-  state.eye.smoothY = state.eye.smoothY === null ? targetY : state.eye.smoothY + (targetY - state.eye.smoothY) * smoothing;
-  state.eye.lastResultAt = performance.now();
-  const shellRect = canvasShell.getBoundingClientRect();
+  const now = performance.now();
   const canvasRect = canvas.getBoundingClientRect();
+  smoothGazePoint(targetX, targetY, now, canvasRect, friction.tau, friction.friction);
+  state.eye.lastResultAt = now;
+  const shellRect = canvasShell.getBoundingClientRect();
   const shellX = state.eye.smoothX - shellRect.left;
   const shellY = state.eye.smoothY - shellRect.top;
   const insideShell = shellX >= 0 && shellX <= shellRect.width && shellY >= 0 && shellY <= shellRect.height;
@@ -2739,6 +3039,13 @@ function gazeToArtwork(result) {
     publishOutput(true);
   }
 }
+
+gazeStability.addEventListener("input", () => {
+  updateGazeStabilityLabel();
+  const { windowSize } = gazeFrictionBase();
+  if (state.eye.rawHistory.length > windowSize) state.eye.rawHistory.splice(0, state.eye.rawHistory.length - windowSize);
+});
+updateGazeStabilityLabel();
 
 async function startEyeTracking() {
   if (state.eye.active || state.eye.starting) return;
@@ -3019,10 +3326,8 @@ function setSetupVisible(visible) {
     state.setupComplete = false;
   } else {
     state.setupComplete = true;
-    requestAnimationFrame(() => {
-      fitCanvas();
-      drawCanvas();
-    });
+    renderOutputPreview();
+    requestAnimationFrame(fitCanvas);
   }
 }
 
@@ -3063,6 +3368,7 @@ function setupCollapsibleSections() {
       button.setAttribute("aria-expanded", String(!collapsed));
       button.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} ${title}`);
       button.title = button.getAttribute("aria-label");
+      if (section === outputSection && !collapsed) renderOutputPreview();
     });
     actions.append(button);
   });
@@ -3150,8 +3456,10 @@ async function runAnalysis() {
   }
 }
 
+let previewUrl = null;
+
 function useFile(file) {
-  if (!file) return;
+  if (!file || state.analyzing) return;
   if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
     showToast("Choose a JPG, PNG, or WebP image");
     return;
@@ -3162,11 +3470,13 @@ function useFile(file) {
   }
   state.selectedFile = null;
   updateEntryReadiness();
-  const url = URL.createObjectURL(file);
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  const url = previewUrl = URL.createObjectURL(file);
   setupPreview.src = url;
   setupPreview.hidden = false;
   dropZone.classList.add("has-preview");
   imageFromUrl(url).then((image) => {
+    if (url !== previewUrl) return;
     const pixelCount = image.naturalWidth * image.naturalHeight;
     if (pixelCount > 40_000_000) {
       state.selectedFile = null;
@@ -3194,6 +3504,7 @@ function useFile(file) {
       statusText.hidden = true;
     }
   }).catch(() => {
+    if (url !== previewUrl) return;
     state.selectedFile = null;
     updateEntryReadiness();
     statusText.hidden = false;
@@ -3235,7 +3546,9 @@ soundToggle.addEventListener("click", async () => {
     showToast("Switch to Web Audio to hear browser sound");
     return;
   }
-  await soundEngine.toggle();
+  const turningOn = !soundEngine.audioRequested;
+  const enabled = await soundEngine.toggle();
+  if (state.outputMode !== "web" || (turningOn && !enabled)) return;
   if (state.mode === "pointer") {
     if (soundEngine.enabled) startPointerMusicTimeline();
     else pausePointerMusicTimeline();
@@ -3263,7 +3576,7 @@ function applyMusicSettings(announce = true) {
   else if (state.lastOutput) soundEngine.update(state.lastOutput);
   publishOutput(true);
   $("#musicSourceStatus").textContent = state.regions.length
-    ? `${EMOTION_LABELS[state.emotion.label]} · ${harmonyPlanSummary()}`
+    ? `GEMS-9 · ${gemsProfileName()} · ${harmonyPlanSummary()}`
     : "Automatic harmony";
   if (announce) {
     const label = musicMode.options[musicMode.selectedIndex]?.textContent || mode;
@@ -3425,9 +3738,12 @@ async function setOutputMode(mode, { announce = true, enableWebSound = false } =
 
   if (mode === "midi") {
     await soundEngine.setEnabled(false);
+    if (state.outputMode !== mode) return;
     if (!externalConfig) await loadExternalOutput();
+    if (state.outputMode !== mode) return;
     externalEnabled.checked = true;
     const saved = await saveExternalOutput(false);
+    if (state.outputMode !== mode) return;
     const portLabel = midiPort.selectedOptions[0]?.textContent || "MIDI output";
     const available = externalDependencies?.midi?.available !== false;
     if (state.mode === "pointer") startPointerMusicTimeline();
@@ -3437,13 +3753,14 @@ async function setOutputMode(mode, { announce = true, enableWebSound = false } =
   } else {
     $("#outputModeStatus").textContent = soundEngine.enabled ? "Browser sound on" : "Browser sound · press Sound";
     soundToggle.title = "Turn browser sound on or off";
-    if (enableWebSound) await soundEngine.setEnabled(true);
+    const enabled = enableWebSound ? await soundEngine.setEnabled(true) : soundEngine.enabled;
+    if (state.outputMode !== mode) return;
     if (state.mode === "pointer") {
       if (soundEngine.enabled) startPointerMusicTimeline();
       else pausePointerMusicTimeline();
     }
     if (soundEngine.enabled) $("#outputModeStatus").textContent = "Browser sound on";
-    if (announce) showToast(soundEngine.enabled ? "Web Audio on" : "Web Audio selected");
+    if (announce && (!enableWebSound || enabled)) showToast(enabled ? "Web Audio on" : "Web Audio selected");
   }
   try { localStorage.setItem("streetart:output-mode", mode); } catch (_) { /* Storage is optional. */ }
   publishOutput(true);
@@ -3461,6 +3778,8 @@ async function startOver() {
   $("#toast").textContent = "";
   resetScan(false);
   if (state.eye.active || state.eye.starting) stopEyeTracking();
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = null;
   await soundEngine.setEnabled(false);
   state.selectedFile = null;
   state.image = null;
@@ -3468,12 +3787,14 @@ async function startOver() {
   resetPointerMusicTimeline();
   resetPointerCrossfade();
   state.manifest = null;
-  state.emotion = { ...DEFAULT_EMOTION };
+  state.gems = normalizeGemsProfile(null);
+  renderGemsProfile();
   state.regions = [];
   state.activeRegion = null;
   fileInput.value = "";
   setupPreview.hidden = true;
   setupPreview.removeAttribute("src");
+  $("#thumbImage").removeAttribute("src");
   dropZone.classList.remove("has-preview", "dragging");
   $("#fileName").textContent = "Drop artwork";
   $("#fileMeta").textContent = "Click to choose · JPG, PNG or WebP";

@@ -152,7 +152,7 @@ body.fullscreen-fallback-active { overflow: hidden; }
 .music-controls input, .music-controls select { width: 100%; height: 31px; margin-top: 4px; padding: 0 7px; border: 1px solid var(--line); background: #fff; color: var(--ink); outline: none; font: .65rem "SFMono-Regular", Consolas, monospace; }
 .music-controls select { cursor: pointer; }
 .music-controls input:focus, .music-controls select:focus { border-color: #8d8f88; box-shadow: 0 0 0 2px rgba(23,24,22,.05); }
-.pointer-bar { min-height: 57px; padding: 8px 10px; display: grid; grid-template-columns: auto minmax(150px, 1fr) 70px 88px; align-items: center; gap: 10px; border: 1px solid var(--line); border-top: 0; background: rgba(251,251,249,.92); }
+.pointer-bar { min-height: 57px; padding: 8px 10px; display: grid; grid-template-columns: auto minmax(130px, 1fr) minmax(112px, 142px) 70px 88px; align-items: center; gap: 10px; border: 1px solid var(--line); border-top: 0; background: rgba(251,251,249,.92); }
 .source-selector { display: flex; height: 35px; }
 .source-selector button { min-width: 76px; padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: .63rem; cursor: pointer; }
 .source-selector button + button { border-left: 0; }
@@ -164,6 +164,12 @@ body.fullscreen-fallback-active { overflow: hidden; }
 .eye-state video { width: 54px; height: 36px; flex: 0 0 auto; object-fit: cover; transform: scaleX(-1); border: 1px solid var(--line); background: #e8e8e4; filter: saturate(.72); }
 .eye-state span, .duration-field span { display: block; color: var(--muted); font-size: .51rem; letter-spacing: .11em; font-weight: 700; }
 .eye-state strong { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .63rem; font-weight: 600; }
+.gaze-stability { min-width: 0; }
+.gaze-stability > span { display: block; color: var(--muted); font-size: .51rem; letter-spacing: .11em; font-weight: 700; }
+.gaze-stability > div { display: grid; grid-template-columns: minmax(54px, 1fr) auto; align-items: center; gap: 7px; margin-top: 4px; }
+.gaze-stability input { width: 100%; height: 13px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+.gaze-stability input:disabled { cursor: not-allowed; opacity: .38; }
+.gaze-stability output { min-width: 40px; color: var(--muted); font-size: .54rem; text-align: right; }
 .calibrate-button { height: 35px; padding: 0 10px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: .62rem; cursor: pointer; }
 .calibrate-button:hover:not(:disabled) { color: var(--ink); border-color: #a9aaa4; }
 .calibrate-button:disabled { cursor: not-allowed; opacity: .42; }
@@ -1078,6 +1084,7 @@ body.setup-active { overflow: hidden; }
   .mode-button > i, .mode-button em { display: none; }
   .pointer-bar { grid-template-columns: 1fr auto auto; }
   .eye-state { grid-column: 1 / -1; grid-row: 2; }
+  .gaze-stability { grid-column: 1 / -1; grid-row: 3; }
   .source-selector button { min-width: 0; flex: 1; }
   .journey-bar { grid-template-columns: 38px minmax(0, 1fr) 58px 48px 36px; gap: 7px; padding: 7px; }
   .journey-play { width: 38px; }
@@ -1207,6 +1214,8 @@ body * {
 .music-heading span,
 .music-heading small,
 .music-controls label > span,
+.gaze-stability > span,
+.gaze-stability output,
 .signal-label,
 .metric span,
 .region-chip small,

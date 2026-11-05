@@ -33,11 +33,47 @@ def main() -> int:
         output = mido.open_output(arguments.port)
     print(json.dumps({"ready": True}), flush=True)
 
-    def note_off(note: int, channel: int) -> None:
-        try:
-            output.send(mido.Message("note_off", note=note, velocity=0, channel=channel))
-        except Exception:
-            pass
+    active_notes: dict[tuple[int, int], threading.Timer] = {}
+    output_lock = threading.Lock()
+
+    def note_off(channel: int, note: int) -> None:
+        output.send(mido.Message("note_off", note=note, velocity=0, channel=channel))
+
+    def play_note(channel: int, note: int, velocity: int, duration: float) -> None:
+        key = (channel, note)
+
+        def expire() -> None:
+            with output_lock:
+                if active_notes.get(key) is not timer:
+                    return
+                try:
+                    note_off(channel, note)
+                except Exception as exc:
+                    print(json.dumps({"error": str(exc)}), file=sys.stderr, flush=True)
+                else:
+                    active_notes.pop(key)
+
+        timer = threading.Timer(duration, expire)
+        timer.daemon = True
+        with output_lock:
+            previous = active_notes.get(key)
+            if previous is not None:
+                note_off(channel, note)
+                previous.cancel()
+                active_notes.pop(key)
+            output.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel))
+            active_notes[key] = timer
+            timer.start()
+
+    def stop_notes() -> None:
+        with output_lock:
+            for (channel, note), timer in active_notes.items():
+                timer.cancel()
+                try:
+                    note_off(channel, note)
+                except Exception as exc:
+                    print(json.dumps({"error": str(exc)}), file=sys.stderr, flush=True)
+            active_notes.clear()
 
     try:
         for line in sys.stdin:
@@ -51,17 +87,16 @@ def main() -> int:
                     note = max(0, min(127, int(message.get("note", 60))))
                     velocity = max(1, min(127, int(message.get("value", 96))))
                     duration = max(.04, min(12, float(message.get("duration", .12))))
-                    output.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel))
-                    timer = threading.Timer(duration, note_off, args=(note, channel))
-                    timer.daemon = True
-                    timer.start()
+                    play_note(channel, note, velocity, duration)
                 elif kind == "cc":
                     control = max(0, min(127, int(message.get("control", 1))))
                     value = max(0, min(127, int(message.get("value", 0))))
-                    output.send(mido.Message("control_change", control=control, value=value, channel=channel))
+                    with output_lock:
+                        output.send(mido.Message("control_change", control=control, value=value, channel=channel))
             except Exception as exc:
                 print(json.dumps({"error": str(exc)}), file=sys.stderr, flush=True)
     finally:
+        stop_notes()
         output.close()
     return 0
 

@@ -7,7 +7,7 @@
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261022-mode-switch1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261101-gaze-friction1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
@@ -150,6 +150,13 @@
           <video id="eyeVideo" autoplay playsinline muted hidden aria-label="Eye-tracking camera preview"></video>
           <div><span>INPUT SOURCE</span><strong id="eyeStatus">Mouse active · camera off</strong></div>
         </div>
+        <label class="gaze-stability" for="gazeStability" title="Friction: lower is more responsive; higher is steadier">
+          <span>GAZE STABILITY</span>
+          <div>
+            <input id="gazeStability" type="range" min="0" max="100" value="50" step="1" disabled aria-label="Eye-tracking stability">
+            <output id="gazeStabilityValue" for="gazeStability">Balanced</output>
+          </div>
+        </label>
         <button id="eyeCalibrate" class="calibrate-button" type="button" disabled>Calibrate</button>
         <button id="pointerFullscreen" class="fullscreen-button" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
@@ -267,6 +274,12 @@
                 <summary>Artist statement</summary>
                 <p id="currentStatement">No artist statement</p>
               </details>
+              <details class="statement-disclosure">
+                <summary>GEMS-9 profile</summary>
+                <p id="gemsSummary">Waiting for analysis</p>
+                <p><strong>Image:</strong> <span id="gemsImageEvidence">No visual evidence yet.</span></p>
+                <p><strong>Statement:</strong> <span id="gemsStatementEvidence">No textual evidence yet.</span></p>
+              </details>
             </span>
           </div>
         </div>
@@ -371,6 +384,7 @@
             <div><dt>BPM and mode</dt><dd>Shared timing and pitch system in any of the twelve keys</dd></div>
             <div><dt>Harmony</dt><dd>Artwork-selected major or minor progressions with inversions, open voicings and tensions</dd></div>
             <div><dt>Rhythm</dt><dd>Long notes, rests, dotted values, syncopation, sixteenths and triplets</dd></div>
+            <div><dt>GEMS-9</dt><dd>Image and statement weights blend a dedicated emotion response for each of the nine instruments</dd></div>
             <div><dt>Region meaning</dt><dd>Voice and musical role</dd></div>
             <div><dt>Vertical position</dt><dd>Pitch</dd></div>
             <div><dt>Horizontal position</dt><dd>Time and musical form</dd></div>
@@ -401,6 +415,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=20261029-unified1"></script>
+  <script src="/static/app.js?v=multipart-regions1"></script>
 </body>
 </html>

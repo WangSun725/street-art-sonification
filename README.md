@@ -36,11 +36,11 @@ You need:
 - Headphones or speakers.
 - A built-in or external webcam for eye tracking.
 
-The first installation downloads approximately 3.7 GB of model weights, plus the local Python environments. Nothing is uploaded to a cloud model during normal use.
+The first installation downloads approximately 2.7 GB of model weights, plus the local Python environments. Nothing is uploaded to a cloud model during normal use.
 
 ## First-time installation
 
-1. Download the latest macOS release ZIP from the GitHub **Releases** page.
+1. On GitHub, select **Code → Download ZIP** to download the latest project from `main`.
 2. Double-click the ZIP file to extract it.
 3. Open the extracted folder.
 4. Right-click **`Install & Start.command`** and choose **Open**.
@@ -48,7 +48,7 @@ The first installation downloads approximately 3.7 GB of model weights, plus the
 6. Keep the Terminal window open while the installation runs.
 7. Wait for the browser to open automatically.
 
-The first installation can take several minutes because it downloads Python packages and four open-source model components. The progress is shown in the Terminal window.
+The first installation can take several minutes because it downloads Python packages and model weights. The progress is shown in the Terminal window.
 
 You do not need Homebrew, Anaconda, or prior programming experience.
 
@@ -69,6 +69,8 @@ http://127.0.0.1:8765
 
 This address only works while the local server is running.
 
+If you are upgrading an existing installation, close the previous server and run **`Install & Start.command`** once to download SAM 3. New uploads use the new segmentation workflow. Re-analyse an artwork to update previously saved masks.
+
 ## Using the interface
 
 ### Start a session
@@ -77,7 +79,7 @@ This address only works while the local server is running.
 2. Drop a JPG, PNG, or WebP image into the opening screen. An artwork is required before **Enter** becomes available.
 3. Add an **Artist statement** explaining the meaning, context, or intention behind the work.
 4. Select **Enter**.
-5. Keep the page open while Qwen3-VL and SAM 2.1 complete the progress bar.
+5. Keep the page open while the local models analyse the artwork.
 6. When the playable regions are ready, choose **Mouse / Eye Tracking** or **Left-to-Right**.
 7. The project then opens the performance interface for that interaction mode.
 
@@ -109,9 +111,10 @@ Browsers require a click before they allow a webpage to play sound. If the page 
 4. Keep your face centred in the small camera preview.
 5. When **Calibrate** becomes available, select it.
 6. Look at each target, hold still, then click the target. Repeat for all twelve points arranged over the artwork.
-7. Look across the artwork. The visible gaze cursor activates the same regions and sounds as the mouse.
+7. Adjust **Gaze stability** if needed: **Responsive** follows faster, while **Stable** reduces visible jitter.
+8. Look across the artwork. The visible gaze cursor activates the same regions and sounds as the mouse.
 
-WebEyeTrack, MediaPipe, and the camera feed run locally in the browser. Camera frames are not sent to the Python server or an external service. Gaze selection votes across a small circular neighbourhood instead of trusting a single pixel, which reduces flicker at region boundaries. The local median colour around the mouse or gaze point also shapes the shared Web Audio / MIDI event. Ordinary webcams are less precise than dedicated infrared eye trackers, so stable lighting and a steady head position improve the result.
+WebEyeTrack, MediaPipe, and the camera feed run locally in the browser. Camera frames are not sent to the Python server or an external service. The adjustable stability control combines a 3–15 frame median window, distance-aware easing, and a dead zone that automatically becomes smaller over small semantic regions. Gaze selection also votes across a small circular neighbourhood instead of trusting a single pixel, which reduces flicker at region boundaries. The local median colour around the mouse or gaze point shapes the shared Web Audio / MIDI event. Ordinary webcams are less precise than dedicated infrared eye trackers, so stable lighting and a steady head position improve the result.
 
 ### Play a left-to-right scan
 
@@ -136,7 +139,7 @@ The scan is synthesised in real time in the browser. It does not wait for an aud
    - Why was it created?
    - What social, personal, or cultural context is important?
 4. Click **Enter**.
-5. Keep the page open while Qwen3-VL and SAM 2.1 analyse the artwork.
+5. Keep the page open while the local models analyse the artwork.
 6. At 100%, the performance interface opens with the new region map.
 
 Images must be smaller than 16 MB and below 40 megapixels. Low-resolution images remain usable, but fine contours may be less accurate. The first analysis after starting the app may take longer because the models need to load into memory.
@@ -144,33 +147,38 @@ Images must be smaller than 16 MB and below 40 megapixels. Low-resolution images
 ## What the system uses
 
 ```text
-Artwork image + artist statement
-                ↓
-Qwen3-VL 2B Instruct 4-bit
-       ↙                    ↘
-Street-art region plan    Emotion profile
-       ↓                    ↓
-SAM 2.1 Hiera Tiny    Visual feature mapping
-       ↓                    ↓
-Region masks       BPM / root / mode
-       ↘                    ↙
-          Shared event engine
-                 ↓
-Mouse / WebEyeTrack / timed scan
-                ↓
-Region-controlled MIDI events
-        ↙               ↘
-4-operator FM Audio     MIDI Out
-                           ↘
-                 Optional OSC / CC mapping
+Artwork image ──→ Qwen3-VL ──→ Image GEMS-9 weights + evidence
+Artist statement → Qwen3-VL ──→ Statement GEMS-9 weights + evidence
+                                      ↓
+                         Deterministic 45 / 55 blend
+                                      ↓
+                           Combined GEMS-9 profile
+                                      ↓
+                    BPM / root / mode + 9 x 9 FM matrix
+
+Artwork image ──→ Street-art region plan ──→ SAM 3 + SAM 2.1 masks
+                                      ↓
+                         Exclusive interaction map
+                                      ↓
+                            Shared event engine
+                                      ↓
+                    Mouse / WebEyeTrack / timed scan
+                                      ↓
+                         Shared musical event stream
+                               ↙              ↘
+              Hybrid FM / digital audio       MIDI Out
+                                                    ↘
+                                          Optional OSC / CC
 ```
 
 - **Qwen3-VL 2B Instruct 4-bit** identifies street-art-specific subjects, lettering, symbols, wall material, paint fields, and weathered textures.
-- Qwen3-VL translates the image and Artist Statement into an emotion profile. A deterministic mapping then derives BPM from emotional arousal and visual energy, mode from valence and tension, and root from a stable artwork-and-statement fingerprint. This avoids repeatedly falling back to the same familiar key and tempo while keeping repeated analyses reproducible.
-- **SAM 2.1 Hiera Tiny** converts the proposed locations into pixel-level masks.
+- Qwen3-VL evaluates the image and Artist Statement separately using the complete **GEMS-9** framework: Wonder, Transcendence, Tenderness, Nostalgia, Peacefulness, Power, Joyful Activation, Tension, and Sadness. It returns nine normalised weights and a short evidence statement for each source instead of selecting one exclusive label. The backend then combines 45% image evidence with 55% statement evidence. No custom five-emotion labels, valence/arousal layer, warmth, or roughness values are used.
+- A deterministic music mapping converts the combined GEMS-9 profile and visual measurements into BPM and mode, while the root note comes from a stable artwork-and-statement fingerprint. Repeated analyses therefore remain reproducible without forcing every artwork into the same key and tempo.
+- **SAM 3 (MLX 6-bit)** looks for multiple instances of a named visual concept within the mural. Matching windows or repeated painted motifs can share one playable region. Small colour-matched painted blocks can also form their own region when the initial plan names only a broad colour background.
+- **SAM 2.1 Hiera Tiny** handles artwork cropping and proposals without a reliable SAM 3 match. The existing crack detector remains active and uses corroborating SAM 3 tile masks near its detected lines. The final non-overlapping masks drive pointer, gaze, contours, and the timed scan. When SAM 3 is unavailable, the SAM 2.1 workflow still runs.
 - The **algorithmic music engine** assigns each region one of nine musical roles, quantises every note to the shared key and tempo, and generates melody, chords, bass, drums, and texture in real time.
 - **WebEyeTrack** uses a lightweight BlazeGaze CNN, MediaPipe face landmarks, head-pose compensation, and local calibration to estimate a screen gaze point.
-- **Web Audio** uses a shared four-operator FM/phase-modulation engine implemented in an AudioWorklet. Each of the nine roles has a distinct routing algorithm, operator ratios, modulation envelopes, feedback, filtering, drive, and articulation. It renders exactly the same note, chord, rhythm, velocity, duration, crossfade, and control events used by MIDI Out; only the final instrument renderer changes.
+- **Web Audio** uses a hybrid four-operator FM/phase-modulation engine implemented in an AudioWorklet. FM is combined with anti-aliased saw and pulse layers, five-voice unison, pitch envelopes, comb-resonator plucks, formant filtering, wavefolding, clipping, bit reduction, transient/noise layers, and two-LFO movement. Lead and Pad favour wide synthetic stacks; Guitar and Keys favour resonant plucks; Counter Synth favours glass/formant colour; Bass and Drums use compact pitch envelopes and clipping; Percussion / Texture uses inharmonic FM and controlled digital fracture. A 9-emotion × 9-instrument response matrix gives every instrument a dedicated version of every GEMS dimension across 29 continuously blended synthesis parameters. Tempo-synchronised delay and ducked reverb preserve rhythmic clarity while allowing spatial tails to bloom between gestures. Web Audio renders exactly the same note, chord, rhythm, velocity, duration, crossfade, and controller events used by MIDI Out; only the final instrument renderer changes.
 - **Mido + python-rtmidi** send MIDI notes and controller values through CoreMIDI.
 - **python-osc** sends OSC messages to a local or network receiver.
 
@@ -190,7 +198,7 @@ Each playable region receives one unique musical role. The same role is used by 
 
 When an artwork has fewer than nine regions, the semantic region types determine which subset of roles is used. For example, lettering prefers Drums, wall areas prefer Pad, figures prefer Lead Synth, and textured paint prefers Percussion / Texture.
 
-The system creates notes only while the artwork is being explored. Position selects pitches from the shared scale, region type selects an instrument role, and local colour, brightness, texture, movement, and the image-and-statement emotion profile shape articulation and timbre. The rhythm engine mixes long notes, rests, quarters, eighths, sixteenths, dotted values, syncopation, and triplets in four-bar A–A′–B–A phrases instead of repeating one fixed 16-step pattern. The harmony engine automatically selects primary and contrasting progressions from major or minor Roman-numeral pools, so the same progressions transpose to all twelve keys. Guitar, Pad, Strings, and Keys can play simultaneous chords as well as broken patterns; chord voicings may be inverted, spread across several octaves, and extended with 7ths, 9ths, 11ths, or 13ths. Pointer / Gaze activates one region at a time; Left-to-Right Scan can layer up to five regions under the scan line. Web Audio and MIDI Out consume one shared performance frame, so neither mode adds its own extra notes.
+The system creates notes only while the artwork is being explored. Position selects pitches from the shared scale, region type selects an instrument role, and local colour, brightness, texture, movement, and the combined GEMS-9 profile shape articulation and timbre. The rhythm engine mixes long notes, rests, quarters, eighths, sixteenths, dotted values, syncopation, and triplets in four-bar A–A′–B–A phrases instead of repeating one fixed 16-step pattern. The harmony engine automatically selects primary and contrasting progressions from major or minor Roman-numeral pools, so the same progressions transpose to all twelve keys. Guitar, Pad, Strings, and Keys can play simultaneous chords as well as broken patterns; chord voicings may be inverted, spread across several octaves, and extended with 7ths, 9ths, 11ths, or 13ths. Pointer / Gaze activates one region at a time; Left-to-Right Scan can layer up to five regions under the scan line. Web Audio and MIDI Out consume one shared performance frame, so neither mode adds its own extra notes.
 
 No model training is required.
 
@@ -277,7 +285,7 @@ The default OSC mappings include `/streetart/position/x`, `/streetart/brightness
 5. Add optional custom MIDI mappings for visual controls such as Y position or movement speed, then select **Apply & save**.
 6. Select **MIDI Out** at the top of the performance controls. This enables the local output route; the advanced switch and mappings can still be adjusted manually.
 
-The shared performance frame also sends a fixed controller set on each active instrument channel: movement/modulation on CC1, pan on CC10, expression/crossfade on CC11, harmonic intensity on CC71, release on CC72, attack on CC73, brightness on CC74, reverb on CC91, and chorus on CC93. Web Audio reads the same normalized values directly. Advanced Control Mapping remains optional for additional OSC or MIDI destinations.
+The shared performance frame also sends a fixed controller set on each active instrument channel: movement/modulation on CC1, pan on CC10, expression/crossfade on CC11, harmonic intensity on CC71, release on CC72, attack on CC73, brightness on CC74, reverb on CC91, chorus on CC93, and delay on CC94. The effect amounts are instrument-specific GEMS blends. Web Audio reads the same normalized values directly. Advanced Control Mapping remains optional for additional OSC or MIDI destinations.
 
 In Pointer / Gaze mode, Web Audio starts or resumes the ten-minute music clock when Sound is enabled; MIDI Out starts or resumes the same clock when that output is selected. Moving or looking into a region gates its assigned generated track at the current global score position rather than restarting it. The browser renderer and MIDI Out both consume the same `music.activeVoices` events, including notes, chords, rhythmic steps, velocities, durations, channels, and `playbackSeconds`. Ableton can therefore replace the embedded timbres without changing the musical performance. Continuous values such as position, speed, brightness, and scan progress can additionally become MIDI CC values or OSC numbers. Selecting **Web Audio** suppresses MIDI messages while keeping optional OSC control available; selecting **MIDI Out** mutes the built-in browser sound and enables MIDI routing.
 
@@ -325,6 +333,7 @@ More technical notes are available in [`WEB_DEMO.md`](WEB_DEMO.md) and [`INTERAC
 
 - Qwen3-VL 2B Instruct, Apache 2.0.
 - SAM 2.1 Hiera Tiny by Meta, Apache 2.0.
+- SAM 3 by Meta, [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE), via the [MLX Community 6-bit conversion](https://huggingface.co/mlx-community/sam3-6bit).
 - WebEyeTrack by RedForestAI, MIT License.
 - MediaPipe Tasks Vision by Google, Apache 2.0.
 - MLX-VLM, MIT License.
@@ -334,10 +343,10 @@ More technical notes are available in [`WEB_DEMO.md`](WEB_DEMO.md) and [`INTERAC
 
 - [SIREN — Sonification Interface for REmapping Nature](https://github.com/Kizjkre/siren) informed the longer-term direction for editable mappings, session saving, and rendered audio export.
 - [Hue Scanner](https://github.com/aumritam/image_color_slider) informed the use of local colour statistics in scan and pointer interaction.
-- [Colour Eye Tracking](https://github.com/aumritam/color_eye_tracking) informed artwork-relative calibration and circular gaze sampling.
+- [Colour Eye Tracking](https://github.com/aumritam/color_eye_tracking) informed artwork-relative calibration, circular gaze sampling, and the adjustable friction concept.
 
 These repositories are acknowledged as design references. Their source code was not copied into this project because no explicit licence file was visible when reviewed; the related interaction ideas were implemented independently in the existing architecture.
 
-The small browser eye-tracking assets are included for reliable local use. The larger Qwen3-VL and SAM model weights are not included; the installer downloads them from their official sources.
+The small browser eye-tracking assets are included for reliable local use. The installer downloads the larger Qwen3-VL and SAM model weights separately.
 
 The project is a research and artistic prototype. Confirm that you have permission to use and redistribute any artwork included in a public exhibition or release.
