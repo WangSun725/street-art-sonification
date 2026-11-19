@@ -1,0 +1,195 @@
+:root {
+  color-scheme: light;
+  font-family: "Geist", system-ui, sans-serif;
+  background: #eeece3;
+  color: #242620;
+  --accent: #a7e284;
+  --muted: #56594e;
+  --line: #d4d3c6;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select { font: inherit; }
+button, .back {
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: .55rem .85rem;
+  cursor: pointer;
+}
+button:disabled { opacity: .42; cursor: default; }
+button:hover:enabled, .back:hover { box-shadow: inset 0 0 0 1px currentColor; }
+:focus-visible { outline: 2px solid #357631; outline-offset: 3px; }
+[hidden] { display: none !important; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  min-height: 60px;
+  padding: .65rem clamp(.85rem, 3vw, 2.5rem);
+  color: #f6f4ec;
+  background: #20231d;
+  border-bottom: 1px solid #4b5043;
+}
+.topbar :focus-visible, .sidebar :focus-visible { outline-color: var(--accent); }
+.back { text-decoration: none; border-color: transparent; padding-left: 0; }
+.topbar button { color: var(--accent); }
+.workspace {
+  display: grid;
+  grid-template-columns: clamp(200px, 24vw, 295px) minmax(0, 1fr);
+  min-height: calc(100vh - 60px);
+}
+.sidebar { padding: 1.65rem 1.25rem; background: #292d24; color: #f7f5eb; }
+.sidebar h1 { font-size: 1.42rem; margin: 0 0 2rem; }
+.sidebar h2 { font-size: .86rem; font-weight: 550; color: #c5c7b8; margin: 0 0 .55rem; }
+#instruments { display: grid; gap: .27rem; }
+#instruments button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .45rem;
+  border: 1px solid transparent;
+  text-align: left;
+  width: 100%;
+  padding-block: .65rem;
+}
+#instruments button[aria-pressed="true"] { color: #20251c; background: var(--accent); }
+.edited-dot { background: currentColor; border-radius: 50%; width: .43rem; height: .43rem; flex: none; }
+.editor { min-width: 0; padding: clamp(1rem, 3vw, 2.75rem); }
+.patch-heading, .controls-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .85rem;
+}
+.patch-heading h2 { font-size: clamp(1.65rem, 3vw, 2.45rem); margin: 0; }
+.patch-heading p { color: var(--muted); margin: .25rem 0 0; }
+.heading-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.primary { background: #242920; color: #f7f5ec; min-width: 5.4rem; }
+#drum-pieces { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.25rem; }
+#drum-pieces button[aria-pressed="true"] { background: #d9eccd; font-weight: 650; }
+.controls-bar {
+  margin: 1.25rem 0;
+  padding: .65rem .75rem;
+  background: #f8f7f0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  justify-content: flex-start;
+}
+.compare { display: flex; gap: .15rem; }
+.compare button { border-color: transparent; }
+.compare button[aria-pressed="true"] { background: #d9eccd; }
+.loop { display: flex; align-items: center; gap: .4rem; color: var(--muted); cursor: pointer; }
+.loop input { accent-color: #376b2c; }
+#status { flex: 1 1 220px; color: var(--muted); margin: 0; min-height: 1.25em; font-size: .85rem; }
+#meter { width: 86px; height: 8px; accent-color: #508447; }
+.preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .55rem;
+  margin-bottom: 1.25rem;
+}
+.preset-bar label { font-size: .9rem; font-weight: 650; }
+.preset-bar select, .waveform-select select {
+  background: #faf9f3;
+  border: 1px solid #aaa99b;
+  color: inherit;
+  border-radius: 6px;
+  padding: .45rem .55rem;
+  min-width: 0;
+}
+.waveform-select { display: grid; gap: .4rem; align-content: start; }
+.waveform-select label { font-size: .8rem; }
+.waveform-select[data-edited] select { border-color: #6d9a5f; background: #e8f1df; }
+.preset-bar select { max-width: 100%; }
+.knob:has(input:disabled) .dial { cursor: default; }
+#knobs { display: grid; gap: .8rem; }
+.panel { border: 1px solid var(--line); border-radius: 9px; background: #faf9f3; min-width: 0; }
+.panel h3 { border-bottom: 1px solid var(--line); font-size: .95rem; padding: .65rem .85rem; margin: 0; }
+.knob-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  padding: .85rem;
+  gap: .8rem .45rem;
+}
+.knob {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  justify-items: center;
+  align-items: start;
+  text-align: center;
+  min-width: 0;
+  position: relative;
+}
+.dial {
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 52px;
+  height: 52px;
+  background: conic-gradient(from 225deg, #76a861 var(--dial-angle, 0deg), #d8d9cd 0deg 270deg, transparent 0deg);
+  border-radius: 50%;
+  touch-action: none;
+  cursor: ns-resize;
+}
+.dial::before {
+  content: "";
+  width: 41px;
+  height: 41px;
+  border-radius: 50%;
+  background: #34382d;
+  border: 2px solid #4e5545;
+  box-shadow: 0 2px 2px #282b2260;
+}
+.dial::after {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 9px;
+  top: 10px;
+  background: #e3f9d4;
+  transform-origin: 50% 16px;
+  transform: rotate(calc(var(--dial-angle, 0deg) - 135deg));
+}
+.dial input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: inherit; }
+.dial:focus-within { outline: 2px solid #357631; outline-offset: 3px; }
+.knob-value {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .2rem;
+  margin: .2rem 0;
+  color: var(--muted);
+  font: .84rem ui-monospace, monospace;
+}
+.knob-value input {
+  width: 6.5ch;
+  box-sizing: content-box;
+  padding: .19rem;
+  min-width: 0;
+  background: #eeeee3;
+  color: #272a20;
+  border: 1px solid #d8d8ca;
+  border-radius: 4px;
+  text-align: center;
+  appearance: textfield;
+}
+.knob-value input::-webkit-inner-spin-button, .knob-value input::-webkit-outer-spin-button { appearance: none; }
+.knob[data-edited] .knob-value input { border-color: #6d9a5f; background: #e8f1df; }
+.knob label { font-size: .8rem; line-height: 1.25; }
+.panel-note { margin: .75rem .85rem 0; color: var(--muted); font-size: .84rem; }
+
+@media (max-width: 670px) {
+  .workspace { grid-template-columns: 1fr; }
+  .sidebar { padding: 1rem; }
+  .sidebar h1 { margin-bottom: .7rem; }
+  #instruments { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #instruments button { padding: .55rem .35rem; font-size: .84rem; }
+  .knob-grid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); }
+}

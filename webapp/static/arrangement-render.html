@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Render arrangement auditions</title>
+<style>body{max-width:700px;margin:10vh auto;padding:24px;background:#f6f3ec;color:#252b28;font:16px system-ui}button{padding:12px 20px;font:inherit;background:#254d3e;color:white;border:0;border-radius:8px;cursor:pointer}progress{display:block;width:100%;height:18px;margin:24px 0}pre{white-space:pre-wrap;font:13px system-ui;color:#59655d}a{color:#254d3e}</style>
+<h1>Arrangement auditions</h1>
+<p>Render the live Web Audio effects and save the listening files locally.</p>
+<button id="start">Render previews</button>
+<progress id="progress" value="0" max="128"></progress>
+<p id="status" role="status">Ready.</p>
+<pre id="log"></pre>
+<a id="reviewLink" href="/review">Open listening review</a>
+<script>
+const $=selector=>document.querySelector(selector);
+const round=new URLSearchParams(location.search).get('round');
+const roundQuery=round?'?round='+encodeURIComponent(round):'';
+$('#reviewLink').href='/review'+roundQuery;
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let running=false;
+function wavBuffer(buffer, headroom){
+  const size=buffer.length*8;
+  const output=new ArrayBuffer(44+size),view=new DataView(output);
+  const tag=(position,text)=>{for(let i=0;i<text.length;i++)view.setUint8(position+i,text.charCodeAt(i));};
+  tag(0,'RIFF');view.setUint32(4,size+36,true);tag(8,'WAVE');tag(12,'fmt ');
+  view.setUint32(16,16,true);view.setUint16(20,3,true);view.setUint16(22,2,true);
+  view.setUint32(24,buffer.sampleRate,true);view.setUint32(28,buffer.sampleRate*8,true);
+  view.setUint16(32,8,true);view.setUint16(34,32,true);tag(36,'data');view.setUint32(40,size,true);
+  const left=buffer.getChannelData(0),right=buffer.getChannelData(1);
+  const samples=new Float32Array(output,44);
+  let peak=0,energy=0;
+  for(let i=0;i<buffer.length;i++){
+    samples[i*2]=left[i];samples[i*2+1]=right[i];
+    if(headroom)peak=Math.max(peak,Math.abs(left[i]),Math.abs(right[i]));
+    if(i%32===0){
+      if(!Number.isFinite(left[i])||!Number.isFinite(right[i]))throw new Error('Non-finite rendered audio');
+      peak=Math.max(peak,Math.abs(left[i]),Math.abs(right[i]));energy+=left[i]*left[i]+right[i]*right[i];
+    }
+  }
+  if(energy<=1e-10)throw new Error('The rendered audition is silent');
+  const gain=headroom&&peak>.8?.8/peak:1;
+  if(gain<1)for(let i=0;i<samples.length;i++)samples[i]*=gain;
+  return {output,peak:peak*gain,rms:gain*Math.sqrt(energy/(Math.ceil(buffer.length/32)*2))};
+}
+async function getJSON(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(await response.text());return response.json();}
+async function renderOne(item,round){
+  const started=performance.now();
+  const phase=text=>{$('#status').textContent=item.name+' · '+item.mode+' · '+text;};
+  phase('Loading score');
+  const score=await getJSON(item.scoreUrl);
+  const source=await fetch(item.dryUrl,{cache:'no-store'});
+  if(!source.ok)throw new Error('Dry audition is not ready');
+  const context=new OfflineAudioContext(2,Math.ceil(score.totalSeconds*48000),48000);
+  phase('Decoding FM audio');
+  const dry=await context.decodeAudioData(await source.arrayBuffer());
+  const graph=await window.createPreviewGraph(context,score);
+  const input=context.createBufferSource();input.buffer=dry;input.connect(graph.musicBus);
+  // Schedule the same active-voice controls over the audition, then let tails
+  // bloom after the final bar. Note generation remains entirely in app.js.
+  if(score.automation){
+    for(const frame of score.automation){
+      graph.controlTime=frame.seconds;
+      graph.applyControlFrame(frame.events);
+    }
+  }else graph.applyControlFrame(score.controls);
+  // Offline automation is scheduled ahead of rendering. The calculation and
+  // parameters match the live graph; no wall-clock suspension is needed.
+  graph.controlTime=score.musicSeconds;graph.applyControlFrame([]);delete graph.controlTime;
+  input.start(0);
+  phase('Rendering native effects');
+  const rendered=await context.startRendering();
+  phase('Encoding stereo MP3');
+  const result=wavBuffer(rendered,Boolean(item.production));
+  const response=await fetch('/api/arrangement-review/audio/'+item.id+'?round='+round,{
+    method:'POST',headers:{'Content-Type':'audio/wav'},body:result.output,
+  });
+  if(!response.ok)throw new Error(await response.text());
+  return {...await response.json(),peak:result.peak,rms:result.rms,renderSeconds:(performance.now()-started)/1000};
+}
+$('#start').addEventListener('click',async()=>{
+  if(running)return;running=true;$('#start').disabled=true;
+  try{
+    let manifest=await getJSON('/api/arrangement-review/manifest'+roundQuery);
+    const script=document.createElement('script');script.src='/runtime/arrangement-review/round-'+String(manifest.round).padStart(2,'0')+'/render-graph.js';
+    await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=reject;document.head.append(script);});
+    for(;;){
+      manifest=await getJSON('/api/arrangement-review/manifest?round='+manifest.round);
+      const complete=manifest.items.filter(item=>item.ready).length;
+      $('#progress').value=complete;$('#progress').max=manifest.items.length;
+      if(complete===manifest.items.length){$('#status').textContent='Finished: '+complete+' stereo auditions saved.';break;}
+      const batch=manifest.items.filter(item=>!item.ready&&item.dryReady).slice(0,4);
+      if(!batch.length){$('#status').textContent=complete+'/'+manifest.items.length+' saved. Waiting for the FM render…';await pause(1500);continue;}
+      await Promise.all(batch.map(async item=>{
+        const result=await renderOne(item,manifest.round);
+        $('#log').textContent=item.id+' · '+result.seconds.toFixed(1)+' s · Stereo · RMS '+result.rms.toFixed(4)+' · Render '+result.renderSeconds.toFixed(1)+' s\n'+$('#log').textContent.slice(0,1800);
+      }));
+    }
+  }catch(error){$('#status').textContent='Stopped: '+(error.message||error);$('#start').disabled=false;}
+  finally{running=false;}
+});
+</script>
+</html>

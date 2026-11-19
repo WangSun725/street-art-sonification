@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FM Patch Editor · Street Art Sonification</title>
+  <link rel="stylesheet" href="./fm-editor.css?v=patch-editor2">
+  <script type="module" src="./fm-editor.mjs?v=performance-mix1"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="back">← Street Art Sonification</a>
+    <button id="export" type="button" disabled>Export changes</button>
+  </header>
+  <main class="workspace">
+    <aside class="sidebar">
+      <h1>FM Patch Editor</h1>
+      <h2 id="instrument-label">Instruments</h2>
+      <div id="instruments" role="group" aria-labelledby="instrument-label"></div>
+    </aside>
+    <section class="editor" aria-labelledby="patch-title">
+      <header class="patch-heading">
+        <div>
+          <h2 id="patch-title">Lead Synth</h2>
+          <p id="patch-info">FM voice</p>
+        </div>
+        <div class="heading-actions">
+          <button id="reset" type="button" disabled>Reset selection</button>
+          <button id="play-kit" type="button" hidden>Play drum kit</button>
+          <button id="play" type="button" class="primary">Play</button>
+        </div>
+      </header>
+      <div id="drum-pieces" role="group" aria-label="Drum pieces" hidden></div>
+      <div class="controls-bar">
+        <div class="compare" role="group" aria-label="Preview patch">
+          <button id="compare-draft" type="button" aria-pressed="true">Draft</button>
+          <button id="compare-default" type="button" aria-pressed="false">Default</button>
+        </div>
+        <label class="loop"><input id="loop" type="checkbox"> Loop preview</label>
+        <progress id="meter" aria-label="Preview signal level" max="1" value="0"></progress>
+        <p id="status" role="status"></p>
+      </div>
+      <div class="preset-bar">
+        <label for="preset">Presets</label>
+        <select id="preset"></select>
+        <button id="use-preset" type="button" hidden>Use as draft</button>
+      </div>
+      <div id="knobs"></div>
+    </section>
+  </main>
+</body>
+</html>

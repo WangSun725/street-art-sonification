@@ -3,15 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#eee6d7">
-  <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
+  <meta name="theme-color" content="#dce0e0">
+  <meta name="description" content="Explore street art through responsive visual contours and sound.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261101-gaze-friction1">
+  <link rel="stylesheet" href="/static/styles.css?v=auto-drums1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
     <div class="setup-stage">
+      <header class="setup-heading">
+        <h1 class="wordmark">
+          <img class="wordmark-paint" src="/static/theme/street-art-sonification.png" width="1050" height="420" alt="Street Art Sonification">
+        </h1>
+      </header>
       <div class="setup-form">
         <label id="dropZone" class="setup-drop-zone" for="fileInput">
           <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp">
@@ -32,6 +37,7 @@
           <span>Enter</span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
         </button>
+        <button id="openPresetSetup" class="preset-button" type="button">Open preset</button>
         <p id="statusText" class="setup-status" role="status" hidden></p>
 
         <div id="setupProgress" class="setup-progress" hidden aria-live="polite">
@@ -42,7 +48,7 @@
             <span data-analysis-step="prepare">Normalize</span>
             <span data-analysis-step="vision">Read</span>
             <span data-analysis-step="segment">Regions</span>
-            <span data-analysis-step="music">MIDI</span>
+            <span data-analysis-step="music">Music</span>
             <span data-analysis-step="ready">Ready</span>
           </div>
         </div>
@@ -65,11 +71,11 @@
           </span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
         </button>
-        <button id="scanMode" class="mode-choice" type="button">
+        <button id="scanMode" class="mode-choice active" type="button">
           <span class="mode-number">02</span>
           <span class="mode-choice-copy">
-            <strong>Left-to-Right</strong>
-            <small>Hear the complete artwork unfold over a chosen duration.</small>
+            <strong>Artwork Scan</strong>
+            <small>Scan the whole artwork or draw a path through selected ranges.</small>
           </span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
         </button>
@@ -86,27 +92,24 @@
           <p id="modeInstruction">Move across the image with a mouse or your eyes</p>
         </div>
         <div class="toolbar-actions">
-          <button id="interactionModeSwitch" class="icon-button mode-swap-button" type="button" title="Switch to Left-to-Right Scan">
+          <button id="interactionModeSwitch" class="icon-button mode-swap-button" type="button" title="Switch to Artwork Scan">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10l-2.5-2.5M17 17H7l2.5 2.5"/><path d="m17 7-2.5 2.5M7 17l2.5-2.5"/></svg>
-            <span>Left-to-Right</span>
+            <span>Scan</span>
+          </button>
+          <button id="linkToggle" class="icon-button link-toggle" type="button" aria-label="Link" aria-pressed="false" title="Turn on Link to use mouse or gaze focus during the scan">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5 14 9.5M8.5 16l-1 1a3.5 3.5 0 0 1-5-5l3-3a3.5 3.5 0 0 1 5 0m3 6a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/></svg>
+            <span>Link Off</span>
           </button>
           <button id="newArtwork" class="icon-button start-over-button" type="button" title="Clear this session and return to the first screen">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7H4v-4M4.5 7.5A8 8 0 1 1 4 16"/></svg>
             <span>Start over</span>
-          </button>
-          <button id="maskToggle" class="icon-button active" type="button" aria-pressed="true" title="Show region contours">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg>
-            <span>Contours</span>
-          </button>
-          <button id="soundToggle" class="icon-button" type="button" aria-pressed="false" title="Turn sound on or off">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 4V5L9 9H5Z"/><path class="sound-wave" d="M17 9.2a4 4 0 0 1 0 5.6M19.5 6.5a8 8 0 0 1 0 11"/></svg>
-            <span>Sound</span>
           </button>
         </div>
       </div>
 
       <div id="canvasShell" class="canvas-shell" tabindex="0" aria-label="Interactive street art canvas">
         <canvas id="artCanvas"></canvas>
+        <div id="scanRangeOverlay" class="scan-range-overlay" hidden></div>
         <div id="gazeCursor" class="gaze-cursor" hidden aria-hidden="true"><i></i></div>
         <div id="scanReadout" class="scan-readout" hidden>
           <span>TIME</span>
@@ -164,7 +167,7 @@
         </button>
       </div>
 
-      <div id="scanControls" class="journey-bar" aria-label="Left-to-right artwork scan" hidden>
+      <div id="scanControls" class="journey-bar" aria-label="Artwork scan" hidden>
         <button id="scanPlay" class="journey-play" type="button" aria-pressed="false">
           <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 9 6-9 6V6Z"/></svg>
           <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M16 6v12"/></svg>
@@ -173,19 +176,39 @@
         <div class="journey-timeline">
           <div class="journey-meta">
             <span>TIME</span>
-            <output id="scanTime" for="scanTimeline">00:00 / 03:00</output>
+            <output id="scanTime" for="scanTimeline">00:00 / 00:30</output>
           </div>
-          <input id="scanTimeline" type="range" min="0" max="180" value="0" step="0.05" aria-label="Timeline position">
+          <input id="scanTimeline" type="range" min="0" max="30" value="0" step="0.05" aria-label="Timeline position">
         </div>
         <label class="duration-field" for="scanDuration">
           <span>DURATION</span>
-          <input id="scanDuration" type="text" value="03:00" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
+          <input id="scanDuration" type="text" value="00:30" inputmode="numeric" aria-label="Scan duration in minutes and seconds">
         </label>
-        <button id="scanReset" class="journey-reset" type="button" title="Return the scan to the left edge">Reset</button>
+        <button id="scanReset" class="journey-reset" type="button" title="Return to the start of the scan path">Reset</button>
         <button id="scanFullscreen" class="fullscreen-button" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
           <span>Fullscreen</span>
         </button>
+        <div id="scanPathTools" class="scan-path-tools">
+          <label>Path
+            <select id="scanDirection" aria-label="Scan path">
+              <option value="forward">Left → Right</option>
+              <option value="reverse">Right → Left</option>
+              <option value="roundtrip">Left → Right → Left</option>
+              <option value="custom">Custom ranges</option>
+            </select>
+          </label>
+          <button id="drawScanRanges" type="button" aria-pressed="false">Select ranges</button>
+          <button id="undoScanRange" type="button" hidden>Undo last</button>
+          <button id="clearScanRanges" type="button" hidden>Clear ranges</button>
+          <label>Voices
+            <select id="scanVoiceMode" aria-label="Scan voices">
+              <option value="backing">Filtered backing</option>
+              <option value="crossing">Scan line only</option>
+            </select>
+          </label>
+          <small id="scanPathStatus" role="status" hidden></small>
+        </div>
       </div>
 
       <div class="interaction-strip">
@@ -202,26 +225,75 @@
 
     <aside class="control-panel">
       <header class="panel-header">
-        <h1>Street Art<br>Sonification</h1>
+        <h1 class="wordmark">
+          <img class="wordmark-paint" src="/static/theme/street-art-sonification.png" width="1050" height="420" alt="Street Art Sonification">
+        </h1>
         <div class="panel-meta">
+          <button id="savePreset" class="preset-button" type="button">Save preset</button>
+          <button id="openPreset" class="preset-button" type="button">Open preset</button>
           <button id="logicOpen" class="logic-open" type="button">Interaction logic</button>
         </div>
       </header>
 
-      <section class="output-mode-section collapsible-section" data-collapsible aria-label="Audio output mode">
-        <div class="output-mode-heading collapsible-heading">
-          <div><strong>Audio Output</strong></div>
-          <div class="section-heading-actions"><small id="outputModeStatus">MIDI Out</small></div>
-        </div>
-        <div class="collapsible-content">
-          <div class="output-mode-switch" role="group" aria-label="Choose audio output">
-            <button type="button" data-output-mode="web" aria-pressed="false">
-              <span>WEB AUDIO</span><small>Hear sound in this page</small>
-            </button>
-            <button class="active" type="button" data-output-mode="midi" aria-pressed="true">
-              <span>MIDI OUT</span><small>Send notes and controls</small>
-            </button>
+      <section class="collapsible-section effects-section" data-collapsible aria-label="Live FM and effects">
+        <div class="collapsible-heading"><div><strong>Live FM and Effects</strong></div><div class="section-heading-actions"></div></div>
+        <div class="collapsible-content effect-trims">
+          <p id="automaticControlStatus">Start playback or explore a region to see its controls.</p>
+          <div id="automaticControls" class="automatic-controls" data-active="false">
+            <div><span>Reverb</span><meter min="0" max="100" value="0" aria-label="Current reverb" data-auto-control="reverb" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Chorus</span><meter min="0" max="100" value="0" aria-label="Current chorus" data-auto-control="chorus" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Delay</span><meter min="0" max="100" value="0" aria-label="Current delay" data-auto-control="delay" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Delay mix</span><meter min="0" max="100" value="0" aria-label="Current right delay share" data-auto-control="delayMix" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Tremolo depth</span><meter min="0" max="100" value="0" aria-label="Current tremolo depth" data-auto-control="tremolo" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Delay feedback</span><meter min="0" max="100" value="0" aria-label="Current delay feedback" data-auto-control="feedback" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Chorus depth</span><meter min="0" max="100" value="0" aria-label="Current chorus depth" data-auto-control="chorusDepth" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>Wet tone</span><meter min="0" max="100" value="0" aria-label="Current wet tone" data-auto-control="effectTone" data-auto-source="fx"></meter><output>—</output></div>
+            <div><span>FM brightness</span><meter min="0" max="100" value="0" aria-label="Current fm brightness" data-auto-control="brightness" data-auto-source="fm"></meter><output>—</output></div>
+            <div><span>FM harmonics</span><meter min="0" max="100" value="0" aria-label="Current fm harmonics" data-auto-control="harmonicIntensity" data-auto-source="fm"></meter><output>—</output></div>
+            <div><span>FM motion</span><meter min="0" max="100" value="0" aria-label="Current fm motion" data-auto-control="movement" data-auto-source="fm"></meter><output>—</output></div>
+            <div><span>FM pan</span><meter min="0" max="100" value="0" aria-label="Current fm pan" data-auto-control="pan" data-auto-source="fm"></meter><output>—</output></div>
           </div>
+          <details class="effect-adjustments">
+            <summary>Shared FX</summary>
+            <p>Adjust the shared effect returns, echo repeats, chorus depth and effect tone.</p>
+            <div class="knob-grid">
+              <label>Reverb<input type="range" data-effect-trim="reverb" min="0" max="200" value="100"><output>100%</output></label>
+              <label>Chorus<input type="range" data-effect-trim="chorus" min="0" max="200" value="100"><output>100%</output></label>
+              <label>Delay<input type="range" data-effect-trim="delay" min="0" max="200" value="100"><output>100%</output></label>
+              <label>Delay feedback<input type="range" data-effect-trim="feedback" min="0" max="200" value="100"><output>100%</output></label>
+              <label>Chorus depth<input type="range" data-effect-trim="chorusDepth" min="0" max="200" value="100"><output>100%</output></label>
+              <label>Wet tone<input type="range" data-effect-trim="effectTone" min="0" max="200" value="100"><output>100%</output></label>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="control-section collapsible-section" data-collapsible aria-label="FM instrument sound">
+        <div class="section-heading collapsible-heading"><h2>FM Instruments</h2><div class="section-heading-actions"></div></div>
+        <div class="collapsible-content">
+          <div class="fm-role-buttons" id="fmRoleButtons" role="group" aria-label="Choose an FM instrument"></div>
+          <div class="fm-role-settings knob-grid">
+            <label>Volume <input id="fmVolume" type="range" min="0" max="100" value="100" aria-label="Instrument volume"><output id="fmVolumeValue" for="fmVolume">100%</output></label>
+            <label>Tone <input id="fmTone" type="range" min="0" max="100" value="36" aria-label="Instrument brightness"><output id="fmToneValue">36%</output></label>
+            <label>Space <input id="fmSpace" type="range" min="0" max="100" value="56" aria-label="Instrument space"><output id="fmSpaceValue">56%</output></label>
+          </div>
+          <details class="effect-adjustments">
+            <summary>Instrument effects</summary>
+            <div class="knob-grid">
+              <label>Delay<input type="range" data-instrument-send="delay" min="0" max="100" aria-label="Instrument delay send"><output></output></label>
+              <label>Reverb<input type="range" data-instrument-send="reverb" min="0" max="100" aria-label="Instrument reverb send"><output></output></label>
+              <label>Chorus<input type="range" data-instrument-send="chorus" min="0" max="100" aria-label="Instrument chorus send"><output></output></label>
+              <label>Delay mix<input type="range" data-instrument-send="delayMix" min="0" max="100" aria-label="Right delay share before color mapping"><output></output></label>
+              <label>Tremolo depth<input type="range" data-instrument-send="tremolo" min="0" max="100" aria-label="Tremolo depth before color mapping"><output></output></label>
+            </div>
+          </details>
+          <details id="fmPatchEditor" class="fm-patch-editor">
+            <summary>Edit FM patch</summary>
+            <p>Patch changes apply to new notes.</p>
+            <div id="fmPatchFields"></div>
+            <button id="resetFmPatch" type="button">Reset patch</button>
+            <a href="/static/fm-editor.html" target="_blank" rel="noopener">Open FM Patch Editor</a>
+          </details>
         </div>
       </section>
 
@@ -245,18 +317,19 @@
           <div class="music-controls">
             <label for="musicBpm"><span>BPM</span><input id="musicBpm" type="number" min="40" max="200" step="1" value="72"></label>
             <label for="musicRoot"><span>ROOT</span><select id="musicRoot" aria-label="Musical root note">
-              <option>C</option><option>C#</option><option selected>D</option><option>D#</option><option>E</option><option>F</option>
+              <option selected>C</option><option>C#</option><option>D</option><option>D#</option><option>E</option><option>F</option>
               <option>F#</option><option>G</option><option>G#</option><option>A</option><option>A#</option><option>B</option>
             </select></label>
             <label for="musicMode"><span>MODE</span><select id="musicMode" aria-label="Musical mode">
-              <option value="major">Major</option>
-              <option value="minor">Minor</option>
-              <option value="dorian" selected>Dorian</option>
-              <option value="phrygian">Phrygian</option>
-              <option value="mixolydian">Mixolydian</option>
-              <option value="minorPentatonic">Minor pentatonic</option>
+              <option value="major" selected>Major</option>
+              <option value="minor">Natural Minor</option>
             </select></label>
           </div>
+          <details class="template-explanation">
+            <summary>Artwork settings</summary>
+            <p id="artworkMusicDetails">Waiting for analysis.</p>
+          </details>
+          <p id="backingDrumStatus" class="backing-drum-status" hidden>Backing drums added automatically</p>
         </div>
       </section>
 
@@ -274,12 +347,7 @@
                 <summary>Artist statement</summary>
                 <p id="currentStatement">No artist statement</p>
               </details>
-              <details class="statement-disclosure">
-                <summary>GEMS-9 profile</summary>
-                <p id="gemsSummary">Waiting for analysis</p>
-                <p><strong>Image:</strong> <span id="gemsImageEvidence">No visual evidence yet.</span></p>
-                <p><strong>Statement:</strong> <span id="gemsStatementEvidence">No textual evidence yet.</span></p>
-              </details>
+
             </span>
           </div>
         </div>
@@ -291,130 +359,116 @@
           <div class="section-heading-actions"><span id="regionCount" class="count-pill">9</span></div>
         </div>
         <div class="collapsible-content">
+          <p id="regionInstrumentHelp" class="region-instrument-help" hidden>While exploring with the mouse, click a card to focus that part. In paused Scan with Link off, click a card to hear its loop by itself. Use the menu to change its instrument.</p>
           <div id="regionList" class="region-list" aria-label="Detected regions"></div>
         </div>
       </section>
 
-      <section class="control-section external-section collapsible-section" data-collapsible aria-label="Advanced MIDI and OSC control mapping">
-        <div class="section-heading inline collapsible-heading">
-          <div><h2>Advanced Control Mapping</h2></div>
-          <div class="section-heading-actions"><span id="externalStatus" class="external-pill"><i></i> Off</span></div>
-        </div>
-        <div class="collapsible-content">
-        <label class="external-enable">
-          <span><strong>Enable control mapping</strong><small>Optional MIDI CC and OSC parameters</small></span>
-          <input id="externalEnabled" type="checkbox" role="switch" aria-label="Enable external output">
-          <i aria-hidden="true"></i>
-        </label>
-
-        <details class="route-card" open>
-          <summary><span><b>OSC</b></span><i aria-hidden="true"></i></summary>
-          <div class="route-fields osc-fields">
-            <label><span>HOST</span><input id="oscHost" type="text" value="127.0.0.1" spellcheck="false"></label>
-            <label><span>PORT</span><input id="oscPort" type="number" min="1" max="65535" value="9000"></label>
-            <button id="oscTest" class="route-test" type="button">Send</button>
-          </div>
-        </details>
-
-        <details class="route-card">
-          <summary><span><b>MIDI</b><small>Notes and controller values</small></span><i aria-hidden="true"></i></summary>
-          <div class="route-fields midi-fields">
-            <label><span>OUTPUT PORT</span><select id="midiPort"><option value="__virtual__">Street Art Sonification (virtual)</option></select></label>
-            <button id="midiRefresh" class="route-refresh" type="button" title="Refresh MIDI ports" aria-label="Refresh MIDI ports">↻</button>
-            <button id="midiTest" class="route-test" type="button">Send test note</button>
-          </div>
-        </details>
-
-        <details class="mapping-editor" open>
-          <summary>
-            <span><b>Mappings</b><small>Choose which visual data controls each destination</small></span>
-            <span id="mappingCount" class="count-pill">0</span>
-          </summary>
-          <div id="mappingList" class="mapping-list"></div>
-          <button id="addMapping" class="add-mapping" type="button">+ Add mapping</button>
-        </details>
-        <div class="external-actions">
-          <button id="saveExternal" class="save-external" type="button">Apply &amp; save</button>
-          <small id="externalMessage" role="status">Settings are stored on this Mac.</small>
-        </div>
-        </div>
-      </section>
-
-      <section class="control-section output-section collapsible-section" data-collapsible>
-        <div class="section-heading inline collapsible-heading">
-          <div><h2>Interaction Signal</h2></div>
-          <div class="section-heading-actions"><span id="socketStatus" class="socket-pill"><i></i> Connected</span></div>
-        </div>
-        <div class="collapsible-content">
-        <pre id="outputJson" aria-label="Current interaction signal">{
-  "region": null,
-  "x": 0,
-  "y": 0
-}</pre>
-        <div class="endpoint-row">
-          <div><span>WebSocket endpoint</span><code id="endpointUrl">ws://127.0.0.1:8765/ws/events</code></div>
-          <button id="copyEndpoint" type="button" title="Copy endpoint" aria-label="Copy WebSocket endpoint">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
-          </button>
-        </div>
-        </div>
-      </section>
     </aside>
   </main>
 
   <div id="logicOverlay" class="logic-overlay" hidden>
     <section class="logic-dialog" role="dialog" aria-modal="true" aria-labelledby="logicTitle">
       <header>
-        <div><span>HOW IT WORKS</span><h2 id="logicTitle">Current interaction logic</h2></div>
+        <h2 id="logicTitle">Interaction logic</h2>
         <button id="logicClose" type="button" aria-label="Close interaction logic">×</button>
       </header>
-      <div class="logic-blocks">
-        <article>
-          <strong>Pointer / Gaze</strong>
-          <p>Each region selects a track from the ten-minute master score. Pointer and gaze follow one shared timeline and reveal the active region track.</p>
-        </article>
-        <article>
-          <strong>Left-to-Right Scan</strong>
-          <p>The scan can last up to ten minutes. A five-minute scan plays 00:00–05:00 of the master score while the image activates up to five region tracks.</p>
-        </article>
-        <article class="logic-mapping">
-          <strong>Sound mapping</strong>
-          <dl>
-            <div><dt>Region</dt><dd>One of nine instrument roles and MIDI channels</dd></div>
-            <div><dt>BPM and mode</dt><dd>Shared timing and pitch system in any of the twelve keys</dd></div>
-            <div><dt>Harmony</dt><dd>Artwork-selected major or minor progressions with inversions, open voicings and tensions</dd></div>
-            <div><dt>Rhythm</dt><dd>Long notes, rests, dotted values, syncopation, sixteenths and triplets</dd></div>
-            <div><dt>GEMS-9</dt><dd>Image and statement weights blend a dedicated emotion response for each of the nine instruments</dd></div>
-            <div><dt>Region meaning</dt><dd>Voice and musical role</dd></div>
-            <div><dt>Vertical position</dt><dd>Pitch</dd></div>
-            <div><dt>Horizontal position</dt><dd>Time and musical form</dd></div>
-            <div><dt>Brightness</dt><dd>Register, voicing and harmonic colour</dd></div>
-            <div><dt>Colour</dt><dd>Motif and pattern variation</dd></div>
-            <div><dt>Saturation</dt><dd>7th, 9th, 11th and 13th tension density</dd></div>
-            <div><dt>Region coverage</dt><dd>Volume</dd></div>
-            <div><dt>Texture</dt><dd>Noise and filter detail</dd></div>
+      <ol class="logic-flow" role="list">
+        <li>
+          <h3>Artwork and artist statement</h3>
+          <p>Upload a mural photo and add an artist statement. The app corrects photo orientation and checks the artwork boundary. The processed artwork supplies the pixels used for color, brightness and musical analysis.</p>
+        </li>
+        <li>
+          <h3>Regions and instruments</h3>
+          <p>Qwen names and locates visible elements, using the statement to guide what it looks for. SAM 3 finds matching shapes, and SAM 2.1 supplies masks where needed. Qwen checks the categories against the masked artwork. Overlap cleanup gives each covered pixel one region.</p>
+          <p>Parts in the same category share a region and its default instrument. Up to nine regions can play. Use the menu under a region card to change its instrument.</p>
+          <details class="logic-region-details">
+            <summary>Default instruments by region category</summary>
+            <dl class="logic-pairs">
+              <div><dt>Figure</dt><dd>Drums</dd></div>
+              <div><dt>Figure Part</dt><dd>Arp Synth</dd></div>
+              <div><dt>Depicted Object</dt><dd>Lead Synth</dd></div>
+              <div><dt>Lettering</dt><dd>Keys / Mallet</dd></div>
+              <div><dt>Graphic Line</dt><dd>Guitar</dd></div>
+              <div><dt>Abstract Shape</dt><dd>FM Organ</dd></div>
+              <div><dt>Painted Ground</dt><dd>Acid Bass</dd></div>
+              <div><dt>Paint Texture</dt><dd>Percussion / Texture</dd></div>
+              <div><dt>Exposed Support</dt><dd>Pad</dd></div>
+            </dl>
+          </details>
+        </li>
+        <li>
+          <h3>A shared musical score</h3>
+          <dl class="logic-pairs">
+            <div><dt>Tempo</dt><dd>Grayscale brightness and RGB chroma contribute equally to a color’s tempo score. The app uses the colors named in the statement, counts an emphasized color twice, and uses reference RGB for any missing color. Without named colors, it weights the two largest color groups by area. This gives a starting tempo on a 72–144 BPM scale.</dd></div>
+            <div><dt>Key and mode</dt><dd>The largest colored hue sector sets the root. The 12 sectors map to the 12 chromatic notes, starting with red for C. A tie goes to the brighter sector. A grayscale artwork defaults to C. Mean grayscale at or above 127.5 selects major. Lower values select natural minor.</dd></div>
+            <div><dt>Harmony</dt><dd>Dominant hue and mode choose a four-bar progression in 4/4. All pitched parts share one chord per bar.</dd></div>
+            <div><dt>Rhythm and melody</dt><dd>The proportion of adjacent pixels with a strong grayscale change puts each region in a sparse, medium or dense group. Each instrument draws from its own patterns. The lead selects a four-bar melody by how well its accented, held and final notes fit the shared chords, and transposes it to the artwork’s key.</dd></div>
           </dl>
-        </article>
-        <article>
-          <strong>Live output</strong>
-          <p>The current region, position, colour and movement data are published about 20 times per second through the page and WebSocket.</p>
-        </article>
-      </div>
+          <p>Use <b>Global System</b> to adjust BPM, root or mode for the whole ensemble.</p>
+        </li>
+        <li>
+          <h3>Interaction and focus</h3>
+          <div class="logic-modes">
+            <section>
+              <h4>Mouse</h4>
+              <p>Move onto the artwork to fade in all region parts on the shared timeline. A clear movement to the right selects arrangement A, and a movement to the left selects B at a bar line. The current region opens its filter. A region card holds focus until you click it again or move onto the artwork.</p>
+            </section>
+            <section>
+              <h4>Eye tracking</h4>
+              <p>Calibrate WebGazer using the on-screen targets. Looking at the artwork fades in the ensemble and opens the filter on the region you look at. Clear horizontal gaze motion selects A or B just like the mouse. Looking away fades the ensemble out.</p>
+            </section>
+            <section>
+              <h4>Scan</h4>
+              <p>Forward uses A and reverse uses B. They share harmony and use different lead melodies. Each range takes whole bars on the shared clock. During playback, use Select ranges and drag left or right to insert a pass. Filtered backing opens parts near the scan line. Scan line only rounds each crossing to playable bars.</p>
+            </section>
+            <section>
+              <h4>Link</h4>
+              <p>While the scan is idle, the mouse or gaze chooses A or B. Press Start to bring in the scan on a downbeat. During the scan the path chooses A or B for the entire ensemble. Mouse and gaze control filter focus and local effects on those same parts. Pausing or finishing the scan returns to exploration.</p>
+            </section>
+          </div>
+          <p>The ensemble normally fades in over <b>2 seconds</b> and out over <b>3 seconds</b>. The focus filter opens from <b>900 Hz</b> toward <b>20 kHz</b>, making the part clearer.</p>
+        </li>
+        <li>
+          <h3>Local color and effects</h3>
+          <p>Mouse and gaze sample a circle within the region mask. Scan samples the current pixel column separately for each region. The median red, green and blue values give a representative color, which is converted to HSV.</p>
+          <dl class="logic-pairs">
+            <div><dt>Hue</dt><dd>Continuously blends the left eighth-note delay and right quarter-note delay. Red is fully left and cyan is fully right. The Delay knob sets the total send.</dd></div>
+            <div><dt>Saturation</dt><dd>More saturated colors deepen tremolo at two volume pulses per beat.</dd></div>
+            <div><dt>HSV value</dt><dd>Darker colors send more of the part to reverb.</dd></div>
+            <div><dt>Brightness contrast</dt><dd>A bigger difference between the 90th and 10th percentiles of sampled pixel brightness increases the chorus send.</dd></div>
+          </dl>
+          <p>Neutral colors and missing samples use the instrument’s manual settings.</p>
+        </li>
+        <li>
+          <h3>Web audio and visual feedback</h3>
+          <p>The browser schedules notes on a shared clock and plays them through a four-operator FM engine. If no region plays Drums, the ensemble adds a synchronized drum track. Each instrument has its own patch, volume and effects controls. Contours and cards show which regions have focus. <b>Live FM and Effects</b> shows their current controls.</p>
+        </li>
+      </ol>
     </section>
   </div>
 
   <div id="calibrationOverlay" class="calibration-overlay" hidden>
     <div class="calibration-copy">
-      <span>WEBEYETRACK · LOCAL CALIBRATION</span>
-      <strong>Keep your head still, look at the target, then click when it is ready.</strong>
-      <small id="calibrationProgress">Point 1 of 12</small>
+      <span>WEBGAZER · EYE CALIBRATION</span>
+      <strong>Keep your head still. Look at each target while clicking it five times.</strong>
+      <small id="calibrationProgress" aria-live="polite">Point 1 of 12 · 0 / 5 clicks</small>
     </div>
     <button id="calibrationCancel" class="calibration-cancel" type="button">Cancel</button>
-    <button id="calibrationTarget" class="calibration-target" type="button" aria-label="Eye-tracking calibration target"><i></i><span>HOLD</span></button>
+    <button id="calibrationTarget" class="calibration-target" type="button" aria-label="Eye-tracking calibration target"><i></i><span>0 / 5</span></button>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=multipart-regions1"></script>
+  <input id="presetFile" type="file" accept=".json,application/json" hidden>
+  <script src="/static/vendor/webgazer/webgazer.js?v=3.5.3-local1" defer></script>
+  <script type="module">
+    import * as composition from "/static/artwork-composition.mjs?v=lead-contrast1";
+    import * as fm from "/static/fm-patches.mjs?v=performance-mix1";
+    import * as scan from "/static/scan-path.mjs?v=live-ranges1";
+    import * as presets from "/static/performance-preset.mjs?v=region-instruments1";
+    window.StreetArtComposition = composition;
+    window.StreetArtStudio = { fm, scan, presets };
+    await import("/static/app.js?v=auto-drums1");
+  </script>
 </body>
 </html>

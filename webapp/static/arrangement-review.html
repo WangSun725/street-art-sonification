@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Arrangement Listening Review</title>
+<style>
+:root{color-scheme:light;--paper:#f8f6f0;--ink:#26372f;--muted:#69756e;--line:#dedfd7;--keep:#276247;--redo:#a54d3d}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,textarea{font:inherit}button,a{touch-action:manipulation}button{cursor:pointer}a{color:var(--keep)}
+header{padding:32px 5vw 20px;border-bottom:1px solid var(--line);background:#fffefa}h1{margin:0;font-size:30px;font-weight:650;letter-spacing:-.04em}header p{margin:7px 0;color:var(--muted)}.header-top{display:flex;gap:20px;justify-content:space-between;align-items:center}.exports{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.exports a,.exports button,.next{padding:9px 13px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-size:13px;text-decoration:none}.exports a[aria-disabled=true]{pointer-events:none;opacity:.45}.counts{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin:18px 0 7px}.counts strong{font-weight:650}progress{width:100%;height:5px;accent-color:var(--keep);display:block}.save{font-size:12px;color:var(--muted)}
+.workspace{display:grid;grid-template-columns:205px minmax(0,1fr);gap:32px;max-width:1400px;margin:0 auto;padding:26px 5vw}nav{position:sticky;top:22px;align-self:start}nav button{display:flex;justify-content:space-between;text-align:left;width:100%;margin:0 0 5px;border:0;border-radius:7px;background:transparent;padding:10px 11px;color:var(--muted)}nav button.active{background:#e9eee6;color:var(--ink);font-weight:600}nav small{font-size:11px;opacity:.8}.filters{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:17px}.filters h2{font-size:20px;margin:0}.filters select{padding:7px;border:1px solid var(--line);border-radius:6px;background:white;font-size:13px}.card{border:1px solid var(--line);border-radius:11px;margin-bottom:20px;overflow:hidden;background:#fffefa}.card-heading{padding:16px 20px 12px;display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line)}.card-heading h3{margin:0;font-size:17px}.meta{font-size:12px;color:var(--muted);margin-top:3px}.state{font-size:12px;color:var(--muted)}.state.keep{color:var(--keep)}.state.redo{color:var(--redo)}.auditions{display:grid;grid-template-columns:1fr 1fr}.audition{padding:17px 20px}.audition+.audition{border-left:1px solid var(--line)}.audition-title{display:flex;justify-content:space-between;align-items:center}.mode{font-weight:600;font-size:14px}.status{font-size:11px;color:var(--muted)}audio{width:100%;height:37px;margin:13px 0 10px}.pending{height:60px;display:flex;align-items:center;font-size:13px;color:var(--muted)}.decisions{display:flex;gap:7px}.decision{background:white;border:1px solid var(--line);border-radius:6px;padding:7px 13px;font-size:13px}.decision[data-status=keep].selected{background:var(--keep);border-color:var(--keep);color:white}.decision[data-status=redo].selected{background:var(--redo);border-color:var(--redo);color:white}.decision.clear{padding:7px 8px;margin-left:auto;color:var(--muted)}textarea{display:block;width:100%;resize:vertical;min-height:58px;max-height:220px;border:1px solid var(--line);border-radius:6px;background:#fafaf6;margin-top:11px;padding:8px;font-size:12px;color:var(--ink)}.downloads{display:flex;gap:15px;margin-top:8px;font-size:11px}.empty{padding:60px;text-align:center;color:var(--muted)}details{font-size:12px;color:var(--muted);margin-top:13px}details p{max-width:850px}.notice{padding:12px;color:var(--redo);border:1px solid var(--line);margin-bottom:15px;border-radius:7px}[hidden]{display:none!important}button:focus-visible,a:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--keep);outline-offset:3px}
+@media(max-width:900px){.workspace{grid-template-columns:1fr;gap:14px}nav{position:static;display:flex;overflow:auto;gap:6px}nav button{white-space:nowrap;width:auto;gap:12px;border:1px solid var(--line);flex:none}.header-top{align-items:flex-start;flex-direction:column}.auditions{grid-template-columns:1fr}.audition+.audition{border-left:0;border-top:1px solid var(--line)}}
+#roundLinks{display:flex;gap:8px;flex-wrap:wrap}
+.card.selected-variant{border-color:var(--keep);box-shadow:0 0 0 1px var(--keep)}
+.previous{margin:0 0 10px}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-top"><div><h1>Arrangement Listening Review</h1><p id="reviewSubtitle">Arrangement library · Major &amp; Minor</p></div>
+    <div class="exports"><span id="roundLinks"></span><button id="export">Export feedback</button><a id="pack" aria-disabled="true">Download audio + MIDI</a><a href="http://127.0.0.1:8765/">Project</a></div>
+  </div>
+  <div class="counts"><span><strong id="ready">0 / 128</strong> ready</span><span><strong id="reviewed">0 / 128</strong> reviewed</span><span><strong id="kept">0</strong> Keep</span><span><strong id="redo">0</strong> Redo</span><span id="saveStatus" class="save" role="status">Loading…</span></div>
+  <progress id="progress" value="0" max="128"></progress>
+  <details><summary>Listening conditions</summary><p id="conditions">Each audition plays all nine instrument parts on one clock, in C Major or C Minor. The tempo is the family's midpoint. Each clip covers 16 bars, including primary and contrasting progressions, plus the sound tails. Visual features stay fixed; the family's GEMS profile shapes the FM sounds. Region gating is disabled so you can hear the arrangement together. The current harmony rules are preserved for this first review.</p><p>Mark each mode Keep or Redo. Add a note if useful: melody, chords, rhythm, sound or mix. Feedback is saved locally. Earlier rounds and accepted audio stay available when a new round is made.</p></details>
+</header>
+<div class="workspace">
+  <nav id="families" aria-label="Musical families"></nav>
+  <main><div id="notice" class="notice" hidden></div><div class="filters"><h2 id="familyTitle">Loading…</h2><div><select id="filter" aria-label="Review filter"><option value="all">All</option><option value="unreviewed">Unreviewed</option><option value="keep">Keep</option><option value="redo">Redo</option></select> <button class="next" id="next">Next unreviewed</button></div></div>
+  <details id="selection" class="card" style="padding:12px 16px" hidden>
+    <summary>How the template number is selected</summary>
+    <p>Choose a family in the sidebar and enter example image measurements. The result uses the same number rule as the artwork app. Each card has two auditions, in C Major and C Minor.</p>
+    <div id="featureFields"></div>
+    <p><output id="selectionResult" aria-live="polite"></output> <button class="next" id="showSelection" type="button">Show card</button></p>
+  </details>
+  <div id="cards"></div></main>
+</div>
+<script>
+const $=s=>document.querySelector(s),storeKey='streetart:arrangement-review:';
+const requestedRound=new URLSearchParams(location.search).get('round');
+const roundQuery=requestedRound?'?round='+encodeURIComponent(requestedRound):'';
+let manifest=null,ratings={},family=null,filter='all',queues=new Map(),timers=new Map(),failedSaves=new Set(),polling=false,pendingRender=false;
+const escapeText=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const statusOf=id=>ratings[id]?.status||'unreviewed';
+async function json(url,options={}){const r=await fetch(url,{cache:'no-store',...options});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||'Local service unavailable');return r.json();}
+function remember(){try{localStorage.setItem(storeKey+manifest.round,JSON.stringify(ratings));}catch{}}
+function counts(){
+ const items=manifest.items,reviewed=items.filter(i=>statusOf(i.id)!=='unreviewed').length;
+ $('#ready').textContent=items.filter(i=>i.ready).length+' / '+items.length;$('#reviewed').textContent=reviewed+' / '+items.length;
+ $('#kept').textContent=items.filter(i=>statusOf(i.id)==='keep').length;$('#redo').textContent=items.filter(i=>statusOf(i.id)==='redo').length;
+ $('#progress').max=items.length;$('#progress').value=reviewed;
+ const pack=manifest.packUrl;if(pack){$('#pack').href=pack;$('#pack').setAttribute('aria-disabled','false');}
+ for(const button of document.querySelectorAll('nav button')){
+   const group=items.filter(i=>i.familyId===button.dataset.family);
+   button.querySelector('small').textContent=group.filter(i=>statusOf(i.id)!=='unreviewed').length+'/'+group.length;
+ }
+}
+function cardState(templateId){
+ const items=manifest.items.filter(i=>i.templateId===templateId),states=items.map(i=>statusOf(i.id));
+ return states.includes('redo')?'redo':states.every(s=>s==='keep')?'keep':'unreviewed';
+}
+function refreshStates(){
+ counts();
+ for(const panel of document.querySelectorAll('.audition')){
+  const value=statusOf(panel.dataset.id);
+  panel.querySelector('.status').textContent=value==='keep'?'Keep':value==='redo'?'Redo':'Unreviewed';
+  for(const button of panel.querySelectorAll('.decision[data-status]')){
+   const pressed=button.dataset.status===value;button.classList.toggle('selected',pressed);button.setAttribute('aria-pressed',String(pressed));
+  }
+ }
+ for(const card of document.querySelectorAll('.card')){
+   const value=cardState(card.dataset.template);
+   const state=card.querySelector('.state');state.className='state '+value;
+   state.textContent=value==='keep'?'Both modes kept':value==='redo'?'Needs another version':'Awaiting review';
+ }
+}
+function queueSave(id){
+ const item=manifest.items.find(i=>i.id===id);if(!item?.ready)return;
+ const snapshot={status:statusOf(id),notes:ratings[id]?.notes||'',revision:item.revision};
+ $('#saveStatus').textContent='Saving…';
+ const previous=queues.get(id)||Promise.resolve();
+ const task=previous.catch(()=>{}).then(async()=>{
+   const saved=await json('/api/arrangement-review/ratings/'+id+'?round='+manifest.round,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(snapshot)});
+   failedSaves.delete(id);if(!failedSaves.size)$('#notice').hidden=true;
+   if(ratings[id]?.status===snapshot.status&&(ratings[id]?.notes||'')===snapshot.notes){ratings[id]=saved;remember();}
+ }).catch(error=>{
+   failedSaves.add(id);
+   $('#notice').hidden=false;$('#notice').textContent='Feedback is kept in this browser. Local saving failed: '+error.message;
+   throw error;
+ }).finally(()=>{
+   if(queues.get(id)===task)queues.delete(id);
+   if(!queues.size&&!timers.size)$('#saveStatus').textContent=$('#notice').hidden?'Saved locally':'Browser backup saved';
+ });
+ queues.set(id,task);task.catch(()=>{});
+}
+function decide(id,status){
+ const item=manifest.items.find(i=>i.id===id);
+ ratings[id]={...ratings[id],status,notes:ratings[id]?.notes||'',revision:item.revision,updatedAt:Date.now()/1000};
+ remember();refreshStates();clearTimeout(timers.get(id));timers.delete(id);queueSave(id);
+}
+function sourceDetails(item){
+ const s=item.source;if(!s)return '';
+ const labels={lead_synth:'Lead',counter_synth:'Arp / Counter',drums:'Drums',bass:'Bass',guitar:'Guitar',pad:'Pad',strings:'Strings',keys_mallet:'Keys / Mallet',percussion_texture:'Percussion'};
+ const roles=list=>list.map(role=>labels[role]||role).join(', ');
+ return '<div class="meta">Source: <a href="'+escapeText(s.url)+'" target="_blank" rel="noopener">'+escapeText(s.title)+'</a> · '+escapeText(s.author)+' · '+escapeText(s.license)+' · bars '+s.startBar+'–'+(s.startBar+s.bars-1)+' · <a href="'+escapeText(s.downloadUrl)+'" target="_blank" rel="noopener">Original MIDI'+(s.downloadUrl.endsWith('.zip')?' pack':'')+'</a></div><div class="meta">From source: '+escapeText(roles(s.sourceRoles))+(s.supplementalRoles.length?' · Added here: '+escapeText(roles(s.supplementalRoles)):'')+'</div>';
+}
+function updateSelection(){
+ if(!manifest.selection)return;
+ const rules=manifest.selection;
+ const additions=rules.map(rule=>Number(document.getElementById('feature-'+rule.key).value)/100>=rule.threshold?rule.increment:0);
+ const version=1+additions.reduce((sum,value)=>sum+value,0);
+ const item=manifest.items.find(i=>i.familyId===family&&i.version===version);
+ if(!item)return;
+ $('#selectionResult').textContent='1 + '+additions.join(' + ')+' = '+String(version).padStart(2,'0')+' · '+item.name;
+ $('#showSelection').dataset.template=item.templateId;
+ for(const card of document.querySelectorAll('.card[data-template]')){
+  card.classList.toggle('selected-variant',card.dataset.template===item.templateId);
+ }
+}
+function render(){
+ if(!manifest)return;
+ pendingRender=false;
+ const selected=manifest.families.find(f=>f.id===family);$('#familyTitle').textContent=selected?.name||'All arrangements';
+ const items=manifest.items.filter(i=>(!family||i.familyId===family));
+ const ids=[...new Set(items.filter(i=>filter==='all'||statusOf(i.id)===filter).map(i=>i.templateId))];
+ $('#cards').innerHTML=ids.map(templateId=>{
+  const group=items.filter(i=>i.templateId===templateId),first=group[0];
+  const production=first.production?'<div class="meta">'+escapeText(first.production.description)+'<br>'+escapeText(first.production.drumEdit)+'</div>':'';
+  return '<article class="card" data-template="'+templateId+'"><div class="card-heading"><div><h3>'+escapeText(first.name)+'</h3><div class="meta">'+first.bpm+' BPM · C · '+first.bars+' bars · '+(first.parts??9)+' active parts</div>'+production+sourceDetails(first)+'</div><span class="state"></span></div><div class="auditions">'+group.map(i=>{
+   const record=ratings[i.id]||{};
+   const comparisonRound=manifest.conditions.performance ? 3 : 2;
+   const previous=i.production&&i.familyId!=='garage_2step'?'<details class="previous"><summary>Compare Round '+comparisonRound+'</summary><audio controls preload="none" src="/runtime/arrangement-review/round-0'+comparisonRound+'/audio/'+escapeText(i.id)+'.mp3" aria-label="Previous round '+escapeText(i.name+' '+i.mode)+'"></audio></details>':'';
+   return '<section class="audition" data-id="'+i.id+'"><div class="audition-title"><span class="mode">'+(i.mode==='major'?'Major':'Minor')+'</span><span class="status"></span></div>'+(i.ready?'<audio controls preload="none" src="'+i.audioUrl+'" aria-label="'+escapeText(i.name+' '+i.mode)+'"></audio>':'<div class="pending">Preparing audio…</div>')+previous+'<div class="decisions"><button class="decision" data-status="keep" '+(!i.ready?'disabled':'')+'>Keep</button><button class="decision" data-status="redo" '+(!i.ready?'disabled':'')+'>Redo</button><button class="decision clear" data-status="unreviewed" '+(!i.ready?'disabled':'')+'>Clear</button></div><textarea aria-label="Notes for '+escapeText(i.name+' '+i.mode)+'" maxlength="2000" placeholder="Optional: what works or needs changing?" '+(!i.ready?'disabled':'')+'>'+escapeText(record.notes||'')+'</textarea><div class="downloads">'+(i.ready?'<a href="'+i.audioUrl+'" download>MP3</a><a href="'+i.midiUrl+'" download>MIDI</a>':'')+'</div></section>';
+  }).join('')+'</div></article>';
+ }).join('')||'<div class="empty">No auditions match this filter.</div>';
+ for(const panel of document.querySelectorAll('.audition')){
+  const id=panel.dataset.id;
+  for(const b of panel.querySelectorAll('.decision'))b.addEventListener('click',()=>decide(id,b.dataset.status));
+  panel.querySelector('textarea').addEventListener('input',event=>{
+   const item=manifest.items.find(i=>i.id===id);
+   ratings[id]={...ratings[id],status:statusOf(id),revision:item.revision,notes:event.target.value,updatedAt:Date.now()/1000};remember();
+   clearTimeout(timers.get(id));timers.set(id,setTimeout(()=>{timers.delete(id);queueSave(id);},500));$('#saveStatus').textContent='Saving…';
+  });
+  for(const audio of panel.querySelectorAll('audio')){
+   audio.addEventListener('play',()=>{for(const other of document.querySelectorAll('audio'))if(other!==audio)other.pause();});
+  }
+ }
+ for(const b of document.querySelectorAll('nav button'))b.classList.toggle('active',b.dataset.family===family);
+ updateSelection();
+ refreshStates();
+}
+async function init(){
+ try{
+  manifest=await json('/api/arrangement-review/manifest'+roundQuery);
+  ratings=(await json('/api/arrangement-review/ratings?round='+manifest.round)).ratings;
+  const recovered=[];
+  try{const local=JSON.parse(localStorage.getItem(storeKey+manifest.round)||'{}');for(const [id,value]of Object.entries(local))if((value.updatedAt||0)>(ratings[id]?.updatedAt||0)&&manifest.items.some(i=>i.id===id&&i.revision===value.revision)){ratings[id]=value;recovered.push(id);}}catch{}
+  family=manifest.families[0].id;
+  const sourceLibrary=Boolean(manifest.conditions.library);
+  $('#reviewSubtitle').textContent=new Set(manifest.items.map(item=>item.templateId)).size+' arrangements · Major & Minor · Round '+manifest.round+(sourceLibrary?' · Source MIDI':'');
+  if(sourceLibrary)$('#conditions').textContent='Each audition uses a published CC0 MIDI excerpt, rendered with a genre-specific instrument bank. The source parts play together on one clock. C Major and C Minor use the same excerpt and rhythm, with scale-degree changes for the alternate mode. Some excerpts have fewer than nine active instruments. Region gating is disabled for comparison.';
+  if(manifest.conditions.production)$('#conditions').textContent='Round 3 pairs source MIDI with new instrument patches, edits to each variant, and four sections. The changes to brightness, texture, stereo position and effect levels are scripted for this listening comparison. Open Compare Round 2 beneath a clip to hear the previous render.';
+  if(manifest.conditions.performance)$('#conditions').textContent='Round 4 uses the same arrangement, FM engine and effects as the artwork app. Major and Minor have separate rhythms, voicings and sound settings. Each clip uses scripted visual movement and plays all its active parts, so you can hear the full arrangement. The live scan uses real pixels and activates only regions it crosses. Compare Round 3 is available for styles that carry over.';
+  const otherRounds=await Promise.all([1,2,3,4].filter(n=>n!==manifest.round).map(async n=>
+    await fetch('/api/arrangement-review/manifest?round='+n,{cache:'no-store'}).then(r=>r.ok).catch(()=>false)?n:null));
+  $('#roundLinks').replaceChildren(...otherRounds.filter(Boolean).map(n=>{
+    const link=document.createElement('a');link.href='/review?round='+n;link.textContent='Round '+n;return link;
+  }));
+  if(manifest.selection){
+    $('#selection').hidden=false;
+    const examples={brightness:62,saturation:58,edge_energy:22};
+    $('#featureFields').replaceChildren(...manifest.selection.map(rule=>{
+      const label=document.createElement('label');
+      label.style.marginRight='1em';
+      label.textContent=rule.label+' ';
+      const field=document.createElement('input');
+      Object.assign(field,{id:'feature-'+rule.key,type:'number',min:0,max:100,value:examples[rule.key]??0});
+      field.style.width='5em';
+      field.addEventListener('input',updateSelection);
+      label.append(field,' % (+'+rule.increment+' at '+Math.round(rule.threshold*100)+'%)');
+      return label;
+    }));
+  }
+  $('#families').innerHTML=manifest.families.map(f=>'<button data-family="'+f.id+'"><span>'+escapeText(f.name)+'</span><small></small></button>').join('');
+  for(const b of document.querySelectorAll('nav button'))b.addEventListener('click',()=>{family=b.dataset.family;render();});
+  $('#saveStatus').textContent='Saved locally';render();for(const id of recovered)queueSave(id);
+ }catch(error){$('#notice').hidden=false;$('#notice').textContent=error.message;$('#familyTitle').textContent='Auditions are being prepared';}
+}
+$('#filter').addEventListener('change',event=>{filter=event.target.value;render();});
+$('#showSelection').addEventListener('click',event=>{
+ filter='all';$('#filter').value=filter;render();
+ document.querySelector('[data-template="'+event.currentTarget.dataset.template+'"]')?.scrollIntoView({behavior:'smooth'});
+});
+$('#next').addEventListener('click',()=>{
+ const item=manifest?.items.find(i=>i.ready&&statusOf(i.id)==='unreviewed');if(!item)return;
+ family=item.familyId;filter='unreviewed';$('#filter').value=filter;render();
+ const section=document.querySelector('[data-id="'+item.id+'"]');section?.scrollIntoView({behavior:'smooth',block:'center'});section?.querySelector('audio')?.play().catch(()=>{});
+});
+$('#export').addEventListener('click',()=>{
+ if(!manifest)return;
+ const result={schema:1,round:manifest.round,exportedAt:new Date().toISOString(),conditions:manifest.conditions,fingerprints:manifest.fingerprints,ratings,
+   redo:manifest.items.filter(i=>statusOf(i.id)==='redo').map(i=>({id:i.id,templateId:i.templateId,mode:i.mode,revision:i.revision,notes:ratings[i.id]?.notes||''}))};
+ const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='arrangement-feedback-round-'+manifest.round+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+window.addEventListener('online',()=>{for(const id of Object.keys(ratings))queueSave(id);});
+setInterval(async()=>{
+ if(polling)return;polling=true;
+ try{if(!manifest){await init();return;}const fresh=await json('/api/arrangement-review/manifest?round='+manifest.round);
+   const changed=fresh.items.some((item,index)=>item.ready!==manifest.items[index]?.ready);manifest=fresh;pendingRender=pendingRender||changed;
+   const playing=[...document.querySelectorAll('audio')].some(audio=>!audio.paused);
+   if(pendingRender&&!playing&&!document.activeElement?.matches('textarea'))render();else counts();
+ }catch{}finally{polling=false;}
+},4000);
+init();
+</script>
+</body>
+</html>

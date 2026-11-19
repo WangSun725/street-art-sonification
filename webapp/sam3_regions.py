@@ -12,10 +12,28 @@ from mlx_vlm.generate import wired_limit
 from mlx_vlm.models.sam3.generate import _load_predictor, predict_multi
 from PIL import Image
 
-from region_proposals import is_wall_crack
+from region_proposals import REGION_TAXONOMY, is_wall_crack
 
 
-OBJECT_TYPES = {"figure", "face", "gesture", "lettering", "detail", "symbol"}
+OBJECT_TYPES = {
+    "figure", "figure_part", "depicted_object", "lettering", "abstract_shape",
+    "face", "gesture", "detail", "symbol",
+}
+ARTWORK_PROMPTS = ["painted mural", "mural panel", "graffiti mural"]
+DISCOVERY_PROMPTS = {
+    "graffiti lettering": ("Graffiti lettering", "lettering", .60),
+    "stylized graffiti letters": ("Painted letter group", "lettering", .55),
+    "painted portrait": ("Painted portrait", "figure", .63),
+    "abstract painted shapes": ("Abstract painted shapes", "abstract_shape", .72),
+    "sharp gray painted shapes": ("Gray angular shapes", "abstract_shape", .74),
+}
+DETAIL_PROMPTS = {
+    "decorative star": "abstract_shape",
+    "round emblem": "abstract_shape",
+    "painted ornament": "abstract_shape",
+    "painted face covering": "depicted_object",
+    "painted jewelry": "depicted_object",
+}
 # Allow warm yellow paint shifted towards orange by shading and lighting.
 PAINT_COLORS = {"red": 0, "orange": 20, "yellow": 33, "green": 88, "blue": 158, "purple": 193}
 
@@ -55,6 +73,37 @@ def predict(predictor, image, prompts, threshold):
             if mask.any():
                 grouped[label].append((box, float(score), mask > 0))
     return grouped
+
+
+def write_artwork_masks(output, hits, content):
+    """Keep confident whole-mural masks and consolidate duplicate detections."""
+    left, top, right, bottom = content
+    size = (right - left) * (bottom - top)
+    candidates = sorted(
+        ((score, mask) for prompt in ARTWORK_PROMPTS for _, score, mask in hits[prompt]
+         if score >= .75 and mask[top:bottom, left:right].sum() >= .012 * size),
+        key=lambda item: -item[0],
+    )
+    panels = []
+    largest = max((np.count_nonzero(mask) for _, mask in candidates), default=0)
+    for score, mask in candidates:
+        area = np.count_nonzero(mask)
+        if area < .15 * largest:
+            continue
+        for panel in panels:
+            intersection = np.count_nonzero(mask & panel["mask"])
+            if intersection >= .70 * min(area, np.count_nonzero(panel["mask"])):
+                if intersection >= .65 * max(area, np.count_nonzero(panel["mask"])):
+                    panel["mask"] = panel["mask"] | mask
+                break
+        else:
+            panels.append({"score": score, "mask": mask})
+    records = []
+    for index, panel in enumerate(panels):
+        filename = f"artwork-{index}.png"
+        Image.fromarray(panel["mask"].astype(np.uint8) * 255).save(output / filename)
+        records.append({"mask": filename, "score": panel["score"]})
+    (output / "artwork.json").write_text(json.dumps(records), encoding="utf-8")
 
 
 def mural_scope(payload, size):
@@ -107,6 +156,50 @@ def crack_support(predictor, image, scope):
     return support
 
 
+def coverage_masks(predictor, image, requested, output):
+    scope = (0, 0, image.width, image.height)
+    hits = predict(predictor, image, [prompt for _, _, prompt in requested], .30)
+    records = []
+    for index, proposal, prompt in requested:
+        anchor = pixel_box(proposal["bbox"], image.size)
+        x1, y1, x2, y2 = anchor
+        matches = []
+        for box, score, mask in hits[prompt]:
+            agreement = overlap(anchor, box)
+            area = np.count_nonzero(mask)
+            if score < .55 or agreement < .25 or np.count_nonzero(mask[y1:y2, x1:x2]) < .70 * area:
+                continue
+            matches.append((agreement * score, box, score, mask))
+        if matches:
+            _, box, score, mask = max(matches, key=lambda item: item[0])
+            records.append(write_region(output, image.size, scope, [(box, score, mask)], index))
+    return records
+
+
+def detail_proposals(predictor, image, output):
+    hits = predict(predictor, image, list(DETAIL_PROMPTS), .66)
+    width, height = image.size
+    options = []
+    for label, kind in DETAIL_PROMPTS.items():
+        detections = sorted(hits[label], key=lambda hit: -hit[1])
+        for box, score, mask in detections[:3]:
+            left, top, right, bottom = (max(0, min(size, round(float(v))))
+                                        for v, size in zip(box, (width, height, width, height)))
+            ys, xs = np.nonzero(mask[top:bottom, left:right])
+            share = len(xs) / (width * height)
+            if not .0005 <= share <= .08:
+                continue
+            closest = np.argmin((xs - (right - left) / 2) ** 2 + (ys - (bottom - top) / 2) ** 2)
+            options.append((score, {
+                "label": label, "type": kind, "artwork_role": "painted",
+                "bbox": [round(v * 1000 / (height if i % 2 else width))
+                         for i, v in enumerate((left, top, right, bottom))],
+                "point": [round((left + xs[closest]) * 1000 / width), round((top + ys[closest]) * 1000 / height)],
+            }))
+    records = [record for _, record in sorted(options, key=lambda item: -item[0])]
+    (output / "detail-proposals.json").write_text(json.dumps({"regions": records}), encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, required=True)
@@ -122,6 +215,20 @@ def main():
     crop = image.crop(scope)
     requested = [(index, proposal, concept_prompt(proposal)) for index, proposal in enumerate(proposals)]
     requested = [(index, proposal, prompt) for index, proposal, prompt in requested if prompt]
+    args.output.mkdir(parents=True, exist_ok=True)
+    if payload.get("discover_details"):
+        predictor = _load_predictor(str(args.model), .30)
+        with wired_limit(predictor.model):
+            detail_proposals(predictor, image, args.output)
+        return
+    if payload.get("coverage_pass"):
+        records = []
+        if requested:
+            predictor = _load_predictor(str(args.model), .30)
+            with wired_limit(predictor.model):
+                records = coverage_masks(predictor, image, requested, args.output)
+        (args.output / "regions.json").write_text(json.dumps(records), encoding="utf-8")
+        return
     # Broad colour fields sometimes contain a repeated painted motif that
     # Qwen did not name. Only promote a colour-matched group with 2+ cubes.
     colors = {}
@@ -130,15 +237,14 @@ def main():
         colors = dict(sorted(colors.items(), key=lambda entry: -np.count_nonzero(entry[1]))[:3])
         colors = {f"{color} cube": mask for color, mask in colors.items() if mask.mean() >= .04}
     crack_count = sum(is_wall_crack(p["label"]) for p in proposals)
-    if not requested and not colors and crack_count != 1:
-        return
-
-    args.output.mkdir(parents=True, exist_ok=True)
     predictor = _load_predictor(str(args.model), .30)
     # Preserve the tested whole-frame concept input. Suppress matches outside
     # the mural scope using their mask, rather than changing the input scale.
     with wired_limit(predictor.model):
-        hits = predict(predictor, image, [p for _, _, p in requested] + list(colors), .30)
+        discover = DISCOVERY_PROMPTS if payload.get("region_taxonomy") == REGION_TAXONOMY and len(proposals) <= 5 else {}
+        hits = predict(predictor, image, [p for _, _, p in requested] + list(colors) + ARTWORK_PROMPTS + list(discover), .30)
+        content = payload.get("preprocessing", {}).get("content_box", [0, 0, image.width, image.height])
+        write_artwork_masks(args.output, hits, content)
         records = []
         used = []
         for index, proposal, prompt in requested:
@@ -174,11 +280,48 @@ def main():
             width, height = image.size
             bbox = [round(value * 1000 / (height if i % 2 else width)) for i, value in enumerate(box)]
             record["proposal"] = {
-                "id": prompt.replace(" ", "_"), "label": f"Painted {prompt}s", "type": "symbol",
+                "id": prompt.replace(" ", "_"), "label": f"Painted {prompt}s",
+                "type": "abstract_shape" if payload.get("region_taxonomy") == REGION_TAXONOMY else "symbol",
+                "artwork_role": "painted",
                 "bbox": bbox, "point": [(bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2],
                 "meaning": "Repeated painted geometric motif", "color_rgb": [196, 145, 250],
             }
             records.append(record)
+
+        # Recover independently detected painted elements that the VLM did not
+        # propose, especially a separate letter group or a portrait on a second panel.
+        retained = np.zeros((bottom - top, right - left), dtype=bool)
+        for record in records:
+            with Image.open(args.output / record["mask"]) as saved:
+                retained |= np.asarray(saved)[top:bottom, left:right] > 0
+        next_index = len(proposals) + sum("proposal" in record for record in records)
+        for prompt, (label, kind, minimum) in discover.items():
+            if next_index >= 9:
+                break
+            added = 0
+            for box, score, mask in hits[prompt]:
+                local_mask = mask[top:bottom, left:right]
+                area = local_mask.sum()
+                if (score < minimum or not .012 < local_mask.mean() < .46 or area < .85 * mask.sum()
+                        or (local_mask & retained).sum() > .18 * area
+                        or any(overlap(pixel_box(p["bbox"], image.size), box) > .60 for p in proposals if p["type"] == kind)):
+                    continue
+                record = write_region(args.output, image.size, scope, [(box, score, local_mask)], next_index)
+                bbox = [round(value * 1000 / image.size[i % 2]) for i, value in enumerate(box)]
+                direction = "left" if bbox[0] + bbox[2] < 1000 else "right"
+                record["proposal"] = {
+                    "id": prompt.replace(" ", "_") + "_" + direction,
+                    "label": f"{label} ({direction})" if kind == "figure" else label,
+                    "type": kind, "artwork_role": "painted",
+                    "bbox": bbox, "point": [(bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2],
+                    "meaning": "", "color_rgb": [139, 152, 239],
+                }
+                records.append(record)
+                retained |= local_mask
+                next_index += 1
+                added += 1
+                if next_index >= 9 or added >= (2 if kind == "figure" else 1):
+                    break
 
         if crack_count == 1:
             support = crack_support(predictor, image, scope)

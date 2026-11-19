@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -16,21 +16,27 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageFilter, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
 from image_preprocessing import ImagePreparationError, prepare_uploaded_image
-from output_bridge import ExternalOutputManager
-from region_proposals import is_wall_crack, normalize_location
+from region_coverage import (
+    DETAIL_TYPES, box_iou, local_detail_candidates, merge_coverage_masks, prepare_coverage_search,
+    prepare_detail_search, prepare_figure_context, read_mask, remap_focus_candidates,
+)
+from region_proposals import (
+    ARCHITECTURAL_FEATURE, BARE_SUPPORT, BASE_LAYER_TYPES, FINE_TYPES, PICTURE_LABEL, REGION_TAXONOMY, REGION_TYPES, is_incidental_region,
+    normalize_location, proposal_region_type, region_type_guide, set_region_type,
+)
+from arrangement_review import router as arrangement_review_router
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = WEB_DIR / "runtime"
 JOBS_DIR = RUNTIME_DIR / "jobs"
-OUTPUT_CONFIG = RUNTIME_DIR / "external-output.json"
 DEMO_IMAGE = ROOT / "inputs" / "the-defiant-one.webp"
 DEMO_DIR = ROOT / "outputs" / "interactive-prep" / "the-defiant-one-regions"
 QWEN_PYTHON = ROOT / ".interaction-env" / "bin" / "python"
@@ -39,8 +45,25 @@ QWEN_MODEL = ROOT / "third_party" / "models" / "Qwen3-VL-2B-Instruct-4bit"
 SAM_SCRIPT = WEB_DIR / "analyze_regions.py"
 SAM3_MODEL = ROOT / "third_party" / "models" / "SAM3-6bit"
 SAM3_SCRIPT = WEB_DIR / "sam3_regions.py"
+QWEN35_MODEL = ROOT / "third_party/models/Qwen3.5-9B-4bit"
+PROPOSAL_CHECKPOINTS = {
+    "qwen3-vl-2b": (QWEN_MODEL, "Qwen3-VL 2B Instruct 4-bit"),
+    "qwen3.5-9b": (QWEN35_MODEL, "Qwen3.5 9B 4-bit"),
+}
+PROPOSAL_MODEL = os.environ.get("STREET_ART_PROPOSAL_MODEL", "qwen3-vl-2b").lower()
+if PROPOSAL_MODEL not in PROPOSAL_CHECKPOINTS:
+    raise ValueError("STREET_ART_PROPOSAL_MODEL must be qwen3-vl-2b or qwen3.5-9b")
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+TARGET_ARTWORK_INSTRUMENTS = 6
+# Up to nine initial proposals plus two from each of three coverage crops.
+MAX_REGION_MASKS = 15
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+DEMO_REGION_TYPES = {
+    "colored_wall": "painted_ground", "background_lettering": "lettering",
+    "left_drips_decay": "paint_texture", "central_figure": "figure", "raised_arm": "figure_part",
+    "black_clothing": "depicted_object", "face": "figure_part",
+    "sunglasses": "depicted_object", "cigarette_smoke": "depicted_object",
+}
 
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,20 +71,10 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="Street Art Resonance Lab")
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 app.mount("/runtime", StaticFiles(directory=RUNTIME_DIR), name="runtime")
+app.include_router(arrangement_review_router)
 
 jobs: dict[str, dict[str, Any]] = {}
-latest_state: dict[str, Any] = {
-    "type": "pointer_state",
-    "region": None,
-    "normalized": {"x": 0, "y": 0},
-    "speed": 0,
-    "edgeProximity": 0,
-    "dwellMs": 0,
-    "timestamp": 0,
-}
-event_clients: set[WebSocket] = set()
 analysis_lock = asyncio.Lock()
-external_output = ExternalOutputManager(OUTPUT_CONFIG)
 
 
 def demo_payload() -> dict[str, Any]:
@@ -69,7 +82,9 @@ def demo_payload() -> dict[str, Any]:
     manifest["analysis_id"] = "demo"
     manifest["image_url"] = "/assets/demo/image"
     manifest["status"] = "ready"
+    manifest["region_taxonomy"] = REGION_TAXONOMY
     for region in manifest["regions"]:
+        set_region_type(region, DEMO_REGION_TYPES[region["id"]])
         region["visual_mask_url"] = f"/assets/demo/{region['visual_mask']}"
         region["hit_mask_url"] = f"/assets/demo/{region['hit_mask']}"
         region.pop("label_zh", None)
@@ -102,18 +117,31 @@ def extract_json(text: str) -> dict[str, Any]:
             region_objects.append(value)
             continue
         decoded_objects.append(value)
+    recovered = [
+        value for value in decoded_objects
+        if ("label" in value and "type" in value
+            and normalize_location(value, thin=True) is not None)
+    ]
     if region_objects:
-        def proposal_score(value: dict[str, Any]) -> tuple[int, int]:
+        def proposal_score(value: dict[str, Any]) -> tuple[int, int, int]:
             regions = value.get("regions", [])
-            complete = sum(
-                1 for item in regions
+            boxes = {
+                tuple(location["bbox"])
+                for item in regions
                 if isinstance(item, dict)
-                and isinstance(item.get("bbox"), list) and len(item["bbox"]) >= 4
-                and isinstance(item.get("point"), list) and len(item["point"]) >= 2
-            )
-            return complete, len(regions)
+                if (location := normalize_location(item, thin=True)) is not None
+            }
+            # A repeated box should never make an alternative response rank
+            # higher, and the containing object may also carry statement colors.
+            return len(boxes), len(value), len(regions)
 
-        return max(region_objects, key=proposal_score)
+        best = max(region_objects, key=proposal_score)
+        if not recovered or proposal_score(best)[0]:
+            return best
+    # A token cutoff can leave the outer object open. Keep complete entries
+    # whose geometry can still be validated instead of discarding the pass.
+    if recovered:
+        return {"regions": recovered}
     if decoded_objects:
         return decoded_objects[0]
     raise ValueError("The vision model did not return valid JSON")
@@ -124,7 +152,7 @@ def slug(value: str, fallback: str) -> str:
     return value[:40] or fallback
 
 
-def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
+def normalize_proposals(raw: dict[str, Any], *, coverage: bool = False) -> list[dict[str, Any]]:
     proposals: list[dict[str, Any]] = []
     seen_boxes: list[list[int]] = []
     colors = [
@@ -132,13 +160,40 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
         [164, 102, 245], [32, 170, 228], [247, 142, 43], [233, 70, 67],
         [126, 211, 33], [22, 184, 213],
     ]
-    valid_types = {"figure", "face", "gesture", "lettering", "wall", "texture", "detail", "symbol", "fill"}
-    for index, item in enumerate(raw.get("regions", [])):
+    raw_regions = raw.get("regions")
+    if not isinstance(raw_regions, list):
+        return proposals
+    for index, item in enumerate(raw_regions):
         if not isinstance(item, dict):
             continue
         label_hint = str(item.get("label") or item.get("region") or "")
-        crack = is_wall_crack(label_hint)
-        thin = crack or item.get("type") == "texture"
+        artwork_role = str(item.get("artwork_role") or "").strip().lower()
+        raw_type = str(item.get("type") or "").strip().lower()
+        if artwork_role == "integrated_material" and raw_type not in {"exposed_support", "wall", "texture"}:
+            artwork_role = "painted"
+        if ((PICTURE_LABEL.fullmatch(label_hint.strip()) and raw_type != "lettering")
+                or is_incidental_region(label_hint, artwork_role)):
+            continue
+        if artwork_role == "integrated_material" and re.fullmatch(
+            r"(?:the )?(?:building|house|facade|façade)", label_hint.strip(), re.I,
+        ):
+            continue
+        if artwork_role != "integrated_material" and (
+            BARE_SUPPORT.fullmatch(label_hint.strip()) or ARCHITECTURAL_FEATURE.fullmatch(label_hint.strip())
+        ):
+            continue
+        region_type = proposal_region_type(raw_type, label_hint, artwork_role)
+        if region_type is None:
+            continue
+        label_type = label_hint.strip().lower().replace(" ", "_")
+        if label_type in REGION_TYPES.keys() - {"lettering", "painted_ground"} and not coverage:
+            continue
+        if (label_hint.strip().lower() in {"main painted subject", "graphic shapes or lettering", "main subject"}
+                or re.fullmatch(r"(?:symbol|detail|shape|object|motif|region)[ _-]*\d*", label_hint.strip(), re.I)):
+            continue
+        if region_type in BASE_LAYER_TYPES and re.fullmatch(r"painted (?:windows?|doors?)", label_hint.strip(), re.I):
+            continue
+        thin = region_type in FINE_TYPES
         location = normalize_location(item, thin=thin)
         if location is None:
             continue
@@ -162,6 +217,11 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
                     break
         region_name = str(item.get("region") or "").strip()
         label = str(item.get("label") or region_name or f"Region {index + 1}").strip()[:48]
+        if coverage and label_type in REGION_TYPES and label_type == region_type:
+            # A local proposal is provisional until the separated mask has
+            # been reviewed. Generic names like "figure" can locate a real
+            # omitted subject even when Qwen supplies no more specific name.
+            label = REGION_TYPES[label_type][0]
         generic_labels = {
             "main painted figure or largest focal object",
             "face or focal internal detail",
@@ -184,12 +244,6 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
                 # image-specific, so use its opening phrase as the visible name.
                 label = re.sub(r"^(the|a|an)\s+", "", meaning, flags=re.IGNORECASE)
                 label = re.split(r"[,;]", label, maxsplit=1)[0].strip()[:48]
-        region_type = str(item.get("type") or "").lower()
-        if region_type not in valid_types:
-            semantic_hint = f"{region_name} {label} {meaning}".lower()
-            region_type = next((kind for kind in valid_types if kind in semantic_hint), "figure" if index == 0 else "detail")
-        if crack:
-            region_type = "texture"
         raw_id = str(item.get("id") or "").strip()
         if raw_id.lower() in {"snake_case", "region_id", "id"} or raw_id.isdigit():
             raw_id = ""
@@ -215,33 +269,13 @@ def normalize_proposals(raw: dict[str, Any]) -> list[dict[str, Any]]:
             "id": region_id,
             "label": label,
             "type": region_type,
+            **({"artwork_role": artwork_role} if artwork_role in {"painted", "integrated_material"} else {}),
             **location,
             **({"parts": parts} if parts else {}),
             "meaning": meaning[:180],
             "color_rgb": colors[len(proposals) % len(colors)],
         })
 
-    fallbacks = [
-        ("paint_surface", "Painted wall field", "wall", [0, 0, 1000, 1000], [80, 100]),
-        ("upper_marks", "Upper painted marks", "lettering", [0, 0, 1000, 480], [180, 160]),
-        ("lower_texture", "Lower wall texture", "texture", [0, 480, 1000, 1000], [160, 800]),
-        ("central_form", "Central painted form", "figure", [180, 100, 850, 1000], [500, 540]),
-        ("left_marks", "Left painted marks", "texture", [0, 120, 340, 920], [140, 520]),
-        ("right_marks", "Right painted marks", "texture", [660, 100, 1000, 920], [860, 500]),
-        ("focal_detail", "Focal painted detail", "detail", [280, 100, 760, 560], [510, 320]),
-    ]
-    for rid, label, kind, box, point in fallbacks:
-        if len(proposals) >= 6:
-            break
-        proposals.append({
-            "id": rid,
-            "label": label,
-            "type": kind,
-            "bbox": box,
-            "point": point,
-            "meaning": "A structural street-art layer used for interaction.",
-            "color_rgb": colors[len(proposals) % len(colors)],
-        })
     return proposals
 
 
@@ -287,40 +321,210 @@ def extract_first_object(text: str) -> dict[str, Any]:
     raise ValueError("The vision model did not return a JSON object")
 
 
+ARTWORK_REGION_SCOPE = (
+    "Find up to 9 distinct visible elements, aiming for 4 or more only when well supported. "
+    "Name the visible thing before classifying it. A whole mural or panel is not a region. "
+    "Importance, size, color and repetition do not change the type. "
+    "Exclude surrounding buildings, bare brick, mortar joints, physical cracks and incidental wear. "
+    "Exclude real doors and windows unless painted forms visually incorporate them. If a window or door is itself an illustration, "
+    "call it a painted window or painted door. "
+    "The artwork_role field has only two values: painted (default) or integrated_material "
+    "(unpainted substrate or architectural feature intentionally used in the design)."
+)
+STATEMENT_COLORS_GUIDE = (
+    "statement_colors is an array of objects with name (copy exact color words from the statement) "
+    "and emphasis (true only when the statement explicitly prioritizes that color). "
+    "Use [] if the statement gives no color."
+)
+
+
 def qwen_prompt(statement: str) -> str:
     context = statement.strip() or "No artist statement was supplied. Infer only visually evident content."
     return f"""Analyze this completed street-art image as material for an accessible interactive sound artwork.
 Artist statement: {context[:1200]}
 Return ONLY valid JSON, no markdown. Use this schema:
-{{"regions":[{{"id":"snake_case","label":"short English label","type":"figure","bbox":[x1,y1,x2,y2],"point":[x,y],"meaning":"one short sensory interpretation"}}],"gems_profile":{{"image":{{"weights":{{"wonder":0.1,"transcendence":0.1,"tenderness":0.1,"nostalgia":0.1,"peacefulness":0.1,"power":0.1,"joyful_activation":0.1,"tension":0.1,"sadness":0.1}},"evidence":"visible evidence only"}},"statement":{{"weights":{{"wonder":0.1,"transcendence":0.1,"tenderness":0.1,"nostalgia":0.1,"peacefulness":0.1,"power":0.1,"joyful_activation":0.1,"tension":0.1,"sadness":0.1}},"evidence":"statement evidence only"}},"combined_rationale":"one short explanation"}}}}
-The schema strings describe the format only. Never output the literal values "snake_case", "short English label", or a pipe-separated list. Create a unique concrete id, label, and one single type for every detected region.
-Coordinates are normalized integers 0-1000. Return 6 to 9 distinct playable regions, using the list below as a visual guide. If a listed feature is absent, replace it with another concrete visible painted shape:
-1. main painted figure or largest focal object
-2. face or focal internal detail
-3. gesture, hand, accessory or held object
-4. one actual painted lettering or glyph cluster
-5. a second different painted mark or color field
-6. exposed wall/material region
-7. paint drip, crack, weathering or spray texture
-8. another small distinctive painted symbol or detail
-9. one additional concrete painted object, mark, or material feature when clearly visible
+The top-level keys are regions and statement_colors. Each region has id, label, type, artwork_role, bbox, point, and meaning. {STATEMENT_COLORS_GUIDE}
+Create a unique concrete id, visible English label, and one single type for every detected region. Never use placeholders or pipe-separated lists.
+Use these region types:
+{region_type_guide()}
+Coordinates are normalized integers 0-1000. A bbox is [left,top,right,bottom]; a point is [x,y]. {ARTWORK_REGION_SCOPE}
 Every label must name what is visibly there (for example "woman with sunglasses", "black upper-left glyphs", "yellow wall field"), never only an abstract word such as "color", "texture", "detail" or "symbol". Use at most one box covering more than 60% of the image. All other boxes must tightly surround different visible shapes. Nested details are allowed, but duplicate boxes are forbidden. Each point must be well inside the intended painted shape, not on a box edge or empty background. Keep meaning under 12 words and connect the visible mark to a tactile or sonic quality.
-Use the complete GEMS-9 framework without inventing, merging, or renaming categories: wonder (awe and being moved), transcendence (inspiration and spiritual elevation), tenderness (affection and warmth), nostalgia (dreamy sentiment and memory), peacefulness (calm and serenity), power (strength and triumph), joyful_activation (lively joy and desire to move), tension (agitation and unease), and sadness (sorrow and melancholy).
-For image.weights, judge only visible content, colour, composition, gesture, material, and atmosphere; do not use the Artist Statement. For statement.weights, judge only the supplied Artist Statement; do not use visible features. Give every category a relative value from 0 to 1. Values do not need to sum to 1 because the application normalizes them. Evidence must explicitly name the visual or textual basis. Do not choose one exclusive emotion. Do not output valence, arousal, warmth, roughness, BPM, key, mode, instruments, or synthesizer settings; the deterministic music engine combines and maps the GEMS-9 profile separately."""
+If the statement highlights a specific painted element, include it if you can visibly locate it. Do not infer BPM, key, mode, instruments, or emotions."""
+
+
+def needs_gems_retry(raw: dict[str, Any]) -> bool:
+    profile = raw.get("gems_profile")
+    if not isinstance(profile, dict):
+        return True
+    for source in ("image", "statement"):
+        item = profile.get(source)
+        if not isinstance(item, dict):
+            return True
+        evidence = str(item.get("evidence", "")).strip().lower().rstrip(".")
+        if evidence in ("", "visible evidence only", "statement evidence only", "one short explanation"):
+            return True
+        weights = item.get("weights")
+        if not isinstance(weights, dict) or any(
+            not isinstance(weights.get(name), (int, float)) or isinstance(weights.get(name), bool)
+            or not math.isfinite(weights[name]) or not 0 <= weights[name] <= 1
+            for name in GEMS_DIMENSIONS
+        ):
+            return True
+        if sum(weights[name] for name in GEMS_DIMENSIONS) <= 0:
+            return True
+    return False
+
+
+def qwen_gems_retry_prompt(statement: str) -> str:
+    return f"""Estimate the GEMS-9 expressive qualities of this artwork and its Artist Statement separately.
+Score order: wonder, transcendence, tenderness, nostalgia, peacefulness, power, joyful_activation, tension, sadness.
+Wonder means awe; transcendence inspiration; tenderness affection; nostalgia memory; peacefulness calm; power strength; joyful_activation lively joy; tension unease; sadness sorrow.
+Artist Statement: {statement[:1200]}
+Return ONLY a JSON object with four keys: image_scores (an array of exactly nine numbers), image_evidence (one sentence naming visible features), statement_scores (an array of exactly nine numbers), statement_evidence (one sentence quoting or paraphrasing the statement).
+For EACH array, allocate a total of 100 emotion points across the nine categories. These are relative emotional emphases, NOT your confidence or image recognition accuracy. Give zero or very few points to emotions with no supporting evidence; competing emotions cannot all have high points. The nine numbers in each array must sum to 100. Judge image_scores from the image only and statement_scores from the text only. Calculate the points for this input. Do not output a format example, placeholder sentences, music settings, or region boxes."""
+
+
+def parse_gems_retry(value: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for source in ("image", "statement"):
+        scores = value.get(f"{source}_scores")
+        if not isinstance(scores, list) or len(scores) != len(GEMS_DIMENSIONS):
+            raise ValueError("Expected nine GEMS scores per source")
+        if any(not isinstance(score, (int, float)) or isinstance(score, bool)
+               or not math.isfinite(score) or score < 0 for score in scores):
+            raise ValueError("GEMS scores must be nonnegative finite numbers")
+        total = sum(scores)
+        if total <= 0:
+            raise ValueError("GEMS scores must contain positive emotional emphasis")
+        # Accept fractional weights as well as the explicitly requested points,
+        # then preserve their relative emphasis in a normalized distribution.
+        scores = [score / total for score in scores]
+        result[source] = {
+            "weights": dict(zip(GEMS_DIMENSIONS, scores)),
+            "evidence": value.get(f"{source}_evidence", ""),
+        }
+    if needs_gems_retry({"gems_profile": result}):
+        raise ValueError("GEMS output contains placeholders or invalid weights")
+    return result
 
 
 def qwen_regions_retry_prompt(statement: str) -> str:
-    context = statement.strip() or "No artist statement was supplied."
-    return f"""Identify 6 to 9 distinct visible regions in this street-art image.
-Artist statement: {context[:600]}
-Return ONLY one valid JSON object with a regions array. Each item must have a unique concrete id, a short visible English label, exactly one type, bbox, point, and a meaning under 12 words. Valid types are figure, face, gesture, lettering, wall, texture, detail, symbol, and fill. Coordinates are integers from 0 to 1000. Bbox has four numbers. Point has exactly two numbers well inside the visible shape. Never use schema placeholders or pipe-separated values. Prefer actual painted figures, faces, hands, lettering, marks, colour fields, wall material, drips, cracks, and spray texture. Do not repeat boxes."""
+    return f"""Identify distinct regions in this street-art image. Start with the main painted subject, graphic shapes or lettering. Include major painted grounds. Exclude physical building fixtures and surroundings.
+Artist statement: {statement[:600] or "None"}
+Return a JSON object with a regions array of up to nine elements. Each item has a short English label, one type, and bbox and point. Bbox has exactly four normalized integers [left,top,right,bottom]. Point has exactly two normalized integers [x,y] well inside the shape. Coordinates are 0 to 1000. Keep entries unique.
+{region_type_guide()}
+{STATEMENT_COLORS_GUIDE}"""
+
+
+def qwen_recovery_prompt() -> str:
+    return """Locate visible painted motifs and broad painted color fields in this mural. Include letter groups, recognizable objects and bounded abstract shapes when present. Name the actual painted element and ignore architecture or scenery.
+Return only a JSON object with a regions array. Each region has an English label, type, bbox [left,top,right,bottom], and point [x,y]. All coordinates are integers from 0 to 1000. Use up to six regions. Types: figure, figure_part, depicted_object, lettering, graphic_line, abstract_shape, painted_ground, paint_texture."""
+
+
+def qwen_coverage_prompt(existing_types: set[str] | None = None) -> str:
+    guidance = ""
+    if existing_types is not None:
+        guidance = (
+            f"Already represented types: {', '.join(sorted(existing_types)) or 'none'}. "
+            f"Types to look for: {', '.join(sorted(REGION_TYPES.keys() - existing_types))}. "
+            "Prefer a visible feature of a missing type when present. Look for separate symbols, shaped "
+            "details or paint textures. Keep the correct type for a real feature even if it already exists. "
+            "Exclude real holes and cracks. Do not subdivide a field or a letter group to produce more features.\n"
+        )
+    return f"""Find up to 2 painted features in this close-up of a mural. Read the full-color area from left to right, including the sides. Gray faded areas are context; leave them out.
+Describe the visible thing first. Look for distinct graffiti lettering, painted objects, bounded shapes or a broad painted field. Group connected marks that form a single feature. Do not name a cropped fragment of a faded feature, an entire mural, architecture, wall damage or shadows. Return an empty array if no independent painted feature is visible.
+{guidance}Types:
+{region_type_guide()}
+Return compact JSON with one "regions" array. Each entry has a concrete "label", one "type", a tight "bbox" [left,top,right,bottom], and an interior "point" [x,y]. All coordinates are integers 0–1000 relative to this close-up. Do not repeat any entry. For a broad field use its color in the label or say multicolored."""
 
 
 def qwen_parts_prompt(proposals: list[dict]) -> str:
     regions = [{key: proposal[key] for key in ("id", "label", "bbox")} for proposal in proposals]
-    return f"""Locate additional visible patches of the SAME named painted mark or wall texture in this street-art image.
+    return f"""Locate additional visible patches of the SAME named feature belonging to the artwork. Exclude unrelated wall wear, mortar joints and scenery.
 Known regions, with the first patch already located: {json.dumps(regions, ensure_ascii=False)}
 Return a JSON object with a "regions" array. Each entry has an existing id and "parts", an array of up to three objects with bbox [x1,y1,x2,y2] and point [x,y]. Use normalized integer coordinates 0 to 1000 relative to the entire image. Each box must tightly enclose a separate visible patch of the same feature and each point must be inside it. Do not include the existing box, unrelated marks, or parts you are unsure about. Return an empty regions array if there are no additional visible patches."""
+
+
+def save_region_review(result_dir: Path, manifest: dict[str, Any], filename: str) -> Path:
+    with Image.open(result_dir / manifest["processed_image"]) as source:
+        artwork = Image.new("RGB", source.size, "#dedbd4")
+        rgba = source.convert("RGBA")
+        artwork.paste(rgba, mask=rgba.getchannel("A"))
+    regions = manifest["regions"]
+    tile_size = 220
+    overview = artwork.copy()
+    overview.thumbnail((tile_size * 3, 320))
+    sheet = Image.new("RGB", (tile_size * 3, overview.height + (tile_size + 24) * ((len(regions) + 2) // 3)), "#f5f3ec")
+    sheet.paste(overview, ((sheet.width - overview.width) // 2, 0))
+    draw = ImageDraw.Draw(sheet)
+    dimmed = Image.blend(artwork, Image.new("RGB", artwork.size, "#dedbd4"), .8)
+    for index, region in enumerate(regions):
+        with Image.open(result_dir / region["visual_mask"]) as image:
+            mask = image.convert("L")
+        bounds = mask.getbbox()
+        if bounds is None:
+            continue
+        x1, y1, x2, y2 = bounds
+        padding = max(12, round(max(x2 - x1, y2 - y1) * .12))
+        box = (max(0, x1 - padding), max(0, y1 - padding),
+               min(artwork.width, x2 + padding), min(artwork.height, y2 + padding))
+        tile = Image.composite(artwork.crop(box), dimmed.crop(box), mask.crop(box))
+        tile.thumbnail((tile_size - 10, tile_size - 10))
+        x = index % 3 * tile_size
+        y = overview.height + index // 3 * (tile_size + 24)
+        draw.text((x + 8, y + 6), str(index + 1), fill="#252320")
+        sheet.paste(tile, (x + (tile_size - tile.width) // 2, y + 24))
+    path = result_dir.parent / filename
+    sheet.save(path)
+    return path
+
+
+def qwen_region_review_prompt(regions: list[dict], *, local_details: bool = False) -> str:
+    hints = [{"tile": index, "candidate": region["label"], "type": region["type"]} for index, region in enumerate(regions, 1)]
+    detail_rule = (
+        " For this detail pass mark the tile uncertain if it mainly shows a different feature from the label, "
+        "only an arbitrary fragment of the named feature, or mixes it with a large part of its surroundings."
+        if local_details else ""
+    )
+    return f"""Check the types of already segmented street-art regions. The first large image is the whole artwork for context. The numbered tiles beneath it show the actual masks in full color, with surrounding pixels faded. Classify the full-color pixels only and use the whole image to tell what they belong to. Candidate names, which can be inaccurate: {json.dumps(hints)}
+Use exactly one of these nine labels per tile:
+{region_type_guide()}
+Rules: a painted geometric block or cube is abstract_shape, even with 3D shading. Broad colored wall paint behind figures is painted_ground. A real window or ordinary bare wall is uncertain unless it was deliberately incorporated as exposed_support. Depicted_object means a named real-world subject pictured in paint, e.g. a key or flower. A standalone portrait is figure; a separately masked eye or hand is figure_part. Check each tile independently.
+Return only JSON with a "regions" array. Each object has the "tile" number, "type", and short "evidence" naming the visible feature. Use "uncertain" as the type when the visible evidence is insufficient. Do not change the masks or merge tiles.{detail_rule}"""
+
+
+def apply_region_review(regions: list[dict], result: dict[str, Any]) -> None:
+    items = result.get("regions")
+    if not isinstance(items, list):
+        return
+    votes: dict[int, dict[str, dict]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        number, kind = item.get("tile"), item.get("type")
+        if type(number) is int and 1 <= number <= len(regions) and isinstance(kind, str):
+            votes.setdefault(number, {})[kind.strip().lower()] = item
+    for number, choices in votes.items():
+        if len(choices) != 1:
+            continue
+        kind = next(iter(choices))
+        item = choices[kind]
+        evidence = str(item.get("evidence") or "").strip()
+        region = regions[number - 1]
+        if kind not in REGION_TYPES:
+            continue
+        kind = proposal_region_type(kind, region["label"], region.get("artwork_role", ""))
+        if kind is None:
+            continue
+        if kind != region["type"]:
+            if kind in BASE_LAYER_TYPES or region["type"] in BASE_LAYER_TYPES:
+                continue  # The layer determines ownership before the tiles are generated.
+            if len(evidence.split()) < 3:
+                continue
+        set_region_type(region, kind)
+        region["category_source"] = "mask_review"
+        if evidence:
+            region["category_evidence"] = evidence
 
 
 def normalize_music_plan(raw: dict[str, Any]) -> dict[str, Any]:
@@ -517,17 +721,258 @@ async def run_command(command: list[str], timeout: int) -> subprocess.CompletedP
     )
 
 
+async def review_region_categories(
+    result_dir: Path, manifest: dict[str, Any], log: Path, *, local_details: bool = False,
+) -> None:
+    if not manifest["regions"]:
+        return
+    try:
+        filename = log.name.replace("-output.txt", ".png")
+        review_path = await asyncio.to_thread(save_region_review, result_dir, manifest, filename)
+        review = await run_command([
+            str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+            "--model", str(QWEN_MODEL), "--image", str(review_path),
+            "--prompt", qwen_region_review_prompt(manifest["regions"], local_details=local_details),
+            "--max-tokens", "740" if local_details else "550",
+            "--temperature", "0", "--no-verbose",
+        ], timeout=100)
+        log.write_text(review.stdout, encoding="utf-8")
+        if review.returncode == 0:
+            apply_region_review(manifest["regions"], extract_json(review.stdout))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass  # An unsuccessful review leaves the proposal categories intact.
+
+
+async def find_sam3_coverage(canvas: Path, proposal_path: Path, output: Path) -> bool:
+    if not (SAM3_MODEL / "model.safetensors").is_file():
+        return False
+    try:
+        semantic = await run_command([
+            str(QWEN_PYTHON), str(SAM3_SCRIPT), "--image", str(canvas),
+            "--proposals", str(proposal_path), "--model", str(SAM3_MODEL), "--output", str(output),
+        ], timeout=90)
+        if semantic.returncode:
+            output.with_name(f"{output.name}-error.log").write_text(semantic.stderr, encoding="utf-8")
+        return semantic.returncode == 0 and (output / "regions.json").is_file()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+async def recover_region_coverage(
+    result_dir: Path, manifest: dict[str, Any], job: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    work_dir = result_dir.parent
+    existing_types = {region["type"] for region in manifest["regions"]}
+    seeking_instruments = len({REGION_TYPES[kind][1] for kind in existing_types}) < TARGET_ARTWORK_INSTRUMENTS
+    search = await asyncio.to_thread(
+        prepare_coverage_search, result_dir, manifest, work_dir, include_large_masks=seeking_instruments,
+    )
+    if search is None:
+        return result_dir, manifest
+
+    canvas, target, crops = search
+    proposals = []
+    for index, (crop, box) in enumerate(crops, 1):
+        job.update(message=f"Checking painted area {index} of {len(crops)}…", progress=70 + 3 * index)
+        try:
+            focused = await run_command([
+                str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
+                "--model", str(QWEN_MODEL), "--image", str(crop),
+                "--prompt", qwen_coverage_prompt(existing_types if seeking_instruments else None), "--max-tokens", "380",
+                "--temperature", "0.15", "--seed", "31", "--repetition-penalty", "1.08", "--no-verbose",
+            ], timeout=70)
+            (work_dir / f"coverage-focus-{index}.txt").write_text(focused.stdout, encoding="utf-8")
+            if focused.returncode == 0:
+                candidates = normalize_proposals(extract_json(focused.stdout), coverage=True)
+                proposals.extend(remap_focus_candidates(candidates, box, target)[:2])
+        except (ValueError, subprocess.TimeoutExpired):
+            continue
+    if seeking_instruments and not any(
+        item["type"] == "depicted_object" for item in [*manifest["regions"], *proposals]
+    ):
+        context = await asyncio.to_thread(prepare_figure_context, result_dir, manifest, canvas)
+        if context is not None:
+            crop, box = context
+            job.update(message="Checking for smaller painted objects near the main figure…", progress=80)
+            try:
+                detail = await run_command([
+                    str(QWEN_PYTHON), "-m", "mlx_vlm.generate", "--model", str(QWEN_MODEL), "--image", str(crop),
+                    "--prompt", "Which small illustrated objects or standalone decorative shapes can you see? "
+                    "Look for items held by a painted person. Exclude whole people, lettering on the wall and broad "
+                    "background colors. Give 1 to 3 specific English names and tight locations, or [] when none. "
+                    "JSON array only. Each entry has label and bbox. bbox is [left, top, right, bottom], each coordinate "
+                    "is an integer from 0 to 1000 in this image.",
+                    "--max-tokens", "270", "--temperature", "0", "--no-verbose",
+                ], timeout=70)
+                (work_dir / "coverage-figure-context.txt").write_text(detail.stdout, encoding="utf-8")
+                if detail.returncode == 0:
+                    objects = [{**item, "type": "depicted_object"} for item in extract_json(detail.stdout).get("regions", [])
+                               if isinstance(item, dict)]
+                    candidates = normalize_proposals({"regions": objects}, coverage=True)
+                    proposals.extend(remap_focus_candidates(candidates, box, target)[:2])
+            except (ValueError, subprocess.TimeoutExpired):
+                pass  # A focused read is optional; keep the coverage candidates.
+    # Reuse the same location and label checks after converting crop coordinates.
+    proposals = normalize_proposals({"regions": proposals}, coverage=True)
+    if not proposals:
+        return result_dir, manifest
+
+    existing_ids = {region["id"] for region in manifest["regions"]}
+    for proposal in proposals:
+        identifier = "coverage_" + proposal["id"]
+        while identifier in existing_ids:
+            identifier += "_extra"
+        proposal["id"] = identifier
+        existing_ids.add(identifier)
+    proposal_path = work_dir / "coverage-proposals.json"
+    proposal_path.write_text(json.dumps({
+        "regions": proposals,
+        "region_taxonomy": REGION_TAXONOMY,
+        "coverage_pass": True,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    extra_dir = work_dir / "result-supplemented"
+    job.update(message="Tracing newly found shapes…", progress=82)
+    sam3_dir = work_dir / "coverage-sam3"
+    sam3_args = ["--sam3", str(sam3_dir)] if await find_sam3_coverage(canvas, proposal_path, sam3_dir) else []
+    extra = await run_command([
+        str(SAM_PYTHON), str(SAM_SCRIPT), "--image", str(canvas),
+        "--proposals", str(proposal_path), "--output", str(extra_dir), *sam3_args,
+    ], timeout=130)
+    if extra.returncode:
+        (work_dir / "coverage-error.log").write_text(extra.stderr, encoding="utf-8")
+        return result_dir, manifest
+    found = json.loads((extra_dir / "regions.json").read_text(encoding="utf-8"))
+    job.update(message="Verifying the new region masks…", progress=87)
+    await review_region_categories(extra_dir, found, work_dir / "coverage-review-output.txt")
+    refined, report = await asyncio.to_thread(
+        merge_coverage_masks, manifest, result_dir, found, extra_dir, target,
+        limit=MAX_REGION_MASKS, split_large_masks=seeking_instruments,
+    )
+    (work_dir / "coverage-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return (extra_dir, refined) if report["accepted_labels"] else (result_dir, manifest)
+
+
+def detail_search_prompt() -> str:
+    categories = "\n".join(line for line in region_type_guide().splitlines() if line.split(":")[0] in DETAIL_TYPES)
+    return f"""Find up to three small, separate, intentionally painted features visible in this crop of a street artwork.
+Look inside and around it for a held or worn item, a distinct painted emblem or geometric symbol, or a visible, separable body part.
+Skip whole people, lettering, broad paint fields, ordinary wall cracks, arbitrary fragments, and highlights or outlines attached to lettering. A separate repeated symbol is allowed if it is clearly visible. Each box should take up less than a quarter of the crop area.
+Give each feature a tight bounding box and put a point inside its painted pixels. If a neighboring shape touches it, give an optional exclude point just outside the feature. Coordinates are integers from 0 to 1000 in this crop, in x,y order.
+Return JSON only: {{"regions":[{{"label":"concrete name","type":"category","artwork_role":"painted","bbox":[left,top,right,bottom],"point":[x,y],"exclude":[[x,y]]}}]}}.
+Use an empty array when there are no clear new features.
+{categories}"""
+
+
+async def find_painted_motifs(canvas: Path, work_dir: Path) -> list[dict]:
+    settings = work_dir / "detail-discovery.json"
+    settings.write_text('{"regions": [], "discover_details": true}', encoding="utf-8")
+    output = work_dir / "detail-sam3"
+    if not (SAM3_MODEL / "model.safetensors").is_file():
+        return []
+    try:
+        result = await run_command([
+            str(QWEN_PYTHON), str(SAM3_SCRIPT), "--image", str(canvas), "--proposals", str(settings),
+            "--model", str(SAM3_MODEL), "--output", str(output),
+        ], timeout=90)
+        if result.returncode == 0:
+            return json.loads((output / "detail-proposals.json").read_text(encoding="utf-8"))["regions"]
+        (work_dir / "detail-discovery-error.txt").write_text(result.stderr, encoding="utf-8")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return []
+
+
+async def recover_local_details(result_dir: Path, manifest: dict[str, Any], job: dict[str, Any]):
+    if len(manifest["regions"]) >= MAX_REGION_MASKS:
+        return result_dir, manifest
+    canvas, visible, crops = await asyncio.to_thread(prepare_detail_search, result_dir, manifest)
+    if not crops:
+        return result_dir, manifest
+    work_dir = result_dir.parent
+    boxes = [(region["type"], region["label"].casefold(), bounds) for region in manifest["regions"]
+             if (bounds := read_mask(result_dir, region).getbbox()) is not None]
+    proposals = []
+
+    def add_candidates(candidates, limit):
+        start = len(proposals)
+        for candidate in candidates:
+            pixels = [round(value * visible.size[i % 2] / 1000) for i, value in enumerate(candidate["bbox"])]
+            kind = candidate["type"]
+            label = candidate["label"].casefold()
+            if any((kind == old_kind or label == old_label) and box_iou(pixels, old) >= .52
+                   for old_kind, old_label, old in boxes):
+                continue
+            candidate["id"] = f"detail_{len(proposals) + 1}_{candidate['id']}"
+            proposals.append(candidate)
+            boxes.append((kind, label, pixels))
+            if len(proposals) - start == limit:
+                return
+
+    job.update(message="Looking for distinct painted motifs…", progress=87)
+    motifs = await find_painted_motifs(canvas, work_dir)
+    motif_candidates = []
+    for raw in motifs:
+        normalized = normalize_proposals({"regions": [raw]}, coverage=True)
+        motif_candidates.extend(local_detail_candidates(normalized, (0, 0, *visible.size), visible, [raw]))
+    add_candidates(motif_candidates, 4)
+
+    for index, (crop, box) in enumerate(crops, 1):
+        job.update(message=f"Checking details in painted area {index} of {len(crops)}…", progress=87 + index)
+        try:
+            focused = await run_command([
+                str(QWEN_PYTHON), "-m", "mlx_vlm.generate", "--model", str(QWEN_MODEL), "--image", str(crop),
+                "--prompt", detail_search_prompt(), "--max-tokens", "430", "--temperature", "0", "--no-verbose",
+            ], timeout=70)
+            (work_dir / f"detail-focus-{index}.txt").write_text(focused.stdout, encoding="utf-8")
+            if focused.returncode:
+                continue
+            raw = extract_json(focused.stdout)
+            normalized = normalize_proposals(raw, coverage=True)
+            smaller = [candidate for candidate in normalized if candidate["type"] != "lettering"
+                       and (candidate["bbox"][2] - candidate["bbox"][0]) * (candidate["bbox"][3] - candidate["bbox"][1]) <= 250_000]
+            candidates = local_detail_candidates(smaller, box, visible, raw.get("regions"))
+        except (ValueError, subprocess.TimeoutExpired):
+            continue
+        add_candidates(candidates, 2)
+    if not proposals:
+        return result_dir, manifest
+    payload = work_dir / "detail-proposals.json"
+    payload.write_text(json.dumps({
+        "regions": proposals, "region_taxonomy": REGION_TAXONOMY, "coverage_pass": True, "local_detail_pass": True,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    output = work_dir / "result-detailed"
+    job.update(message="Tracing and verifying the smaller painted shapes…", progress=90)
+    segmented = await run_command([
+        str(SAM_PYTHON), str(SAM_SCRIPT), "--image", str(canvas), "--proposals", str(payload), "--output", str(output),
+    ], timeout=130)
+    if segmented.returncode:
+        (work_dir / "detail-error.txt").write_text(segmented.stderr, encoding="utf-8")
+        return result_dir, manifest
+    found = json.loads((output / "regions.json").read_text(encoding="utf-8"))
+    await review_region_categories(output, found, work_dir / "detail-review-output.txt", local_details=True)
+    refined, report = await asyncio.to_thread(
+        merge_coverage_masks, manifest, result_dir, found, output, visible, limit=MAX_REGION_MASKS, local_details=True,
+    )
+    (work_dir / "detail-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return (output, refined) if report["accepted_labels"] else (result_dir, manifest)
+
+
+async def propose_regions(image_path: Path, prompt: str, max_tokens: int, timeout: int, *sampling: str):
+    checkpoint, _ = PROPOSAL_CHECKPOINTS[PROPOSAL_MODEL]
+    thinking = ["--thinking-mode", "disabled"] if PROPOSAL_MODEL == "qwen3.5-9b" else []
+    return await run_command([
+        str(QWEN_PYTHON), "-m", "mlx_vlm.generate", "--model", str(checkpoint),
+        "--image", str(image_path), "--prompt", prompt, "--max-tokens", str(max_tokens),
+        *sampling, *thinking, "--no-verbose",
+    ], timeout=timeout)
+
+
 async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessing: dict[str, Any]) -> None:
     job = jobs[job_id]
     async with analysis_lock:
         try:
             job.update(stage="vision", message="Reading the artwork…", progress=18)
-            qwen = await run_command([
-                str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
-                "--model", str(QWEN_MODEL), "--image", str(image_path),
-                "--prompt", qwen_prompt(statement), "--max-tokens", "1500",
-                "--temperature", "0", "--no-verbose",
-            ], timeout=240)
+            qwen = await propose_regions(image_path, qwen_prompt(statement), 1500, 240, "--temperature", "0")
             if qwen.returncode != 0:
                 raise RuntimeError(qwen.stderr.strip()[-600:] or "Vision analysis failed")
             (image_path.parent / "vision-output.txt").write_text(qwen.stdout, encoding="utf-8")
@@ -535,24 +980,38 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                 raw_analysis = extract_json(qwen.stdout)
             except ValueError:
                 raw_analysis = {}
-            raw_regions = raw_analysis.get("regions") if isinstance(raw_analysis.get("regions"), list) else []
-            if len(raw_regions) < 4:
-                job.update(stage="vision", message="Refining the region reading…", progress=27)
-                retry = await run_command([
-                    str(QWEN_PYTHON), "-m", "mlx_vlm.generate",
-                    "--model", str(QWEN_MODEL), "--image", str(image_path),
-                    "--prompt", qwen_regions_retry_prompt(statement), "--max-tokens", "1000",
-                    "--temperature", "0", "--no-verbose",
-                ], timeout=240)
-                (image_path.parent / "vision-retry-output.txt").write_text(retry.stdout, encoding="utf-8")
-                if retry.returncode != 0:
-                    raise RuntimeError(retry.stderr.strip()[-600:] or "Vision analysis retry failed")
-                retry_analysis = extract_json(retry.stdout)
-                if "gems_profile" not in retry_analysis and isinstance(raw_analysis.get("gems_profile"), dict):
-                    retry_analysis["gems_profile"] = raw_analysis["gems_profile"]
-                raw_analysis = retry_analysis
             proposals = normalize_proposals(raw_analysis)
-            gems_profile = normalize_gems_profile(raw_analysis)
+            if len(proposals) < 3 or (len(proposals) < 5 and all(
+                proposal["type"] in BASE_LAYER_TYPES for proposal in proposals
+            )):
+                job.update(stage="vision", message="Refining the region reading…", progress=27)
+                retry_analysis = {}
+                try:
+                    retry = await propose_regions(
+                        image_path, qwen_regions_retry_prompt(statement), 1200, 240,
+                        "--temperature", "0.15", "--seed", "7",
+                    )
+                    (image_path.parent / "vision-retry-output.txt").write_text(retry.stdout, encoding="utf-8")
+                    if retry.returncode == 0:
+                        retry_analysis = extract_json(retry.stdout)
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass
+                proposals = normalize_proposals({"regions": [*proposals, *retry_analysis.get("regions", [])]})
+                if "statement_colors" not in raw_analysis:
+                    raw_analysis["statement_colors"] = retry_analysis.get("statement_colors", [])
+            if len(proposals) < 3 or all(proposal["type"] in BASE_LAYER_TYPES for proposal in proposals):
+                try:
+                    recovery = await propose_regions(
+                        image_path, qwen_recovery_prompt(), 680, 85,
+                        "--temperature", "0", "--repetition-penalty", "1.08",
+                    )
+                    (image_path.parent / "vision-recovery-output.txt").write_text(recovery.stdout, encoding="utf-8")
+                    if recovery.returncode == 0:
+                        proposals = normalize_proposals({
+                            "regions": [*proposals, *extract_json(recovery.stdout).get("regions", [])],
+                        })
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass
             job.update(stage="vision", message="Checking the artwork boundary…", progress=36)
             artwork_payload: dict[str, Any] = {}
             try:
@@ -574,9 +1033,7 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
             repeated = [
                 proposal for proposal in proposals
                 if not proposal.get("parts")
-                and not is_wall_crack(proposal["label"])
-                and proposal["id"] not in {"upper_marks", "lower_texture", "left_marks", "right_marks"}
-                and re.search(r"\b(?:glyphs|dots|drips|splashes|speckles|streaks|stripes|patches|lettering)\b", proposal["label"], re.I)
+                and re.search(r"\b(?:glyphs|dots|drips|splashes|speckles|streaks|stripes|patches|lettering|cracks|fissures)\b", proposal["label"], re.I)
             ][:3]
             if repeated:
                 job.update(message="Locating repeated marks…", progress=40)
@@ -596,15 +1053,16 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
                             target = by_id.get(item["id"])
                             if target and isinstance(item.get("parts"), list):
                                 # Use the same box validation and deduplication as the primary model output.
-                                merged = normalize_proposals({"regions": [{**target, "parts": item["parts"]}]})[0]
-                                if merged.get("parts"):
-                                    target["parts"] = merged["parts"]
+                                merged = normalize_proposals({"regions": [{**target, "parts": item["parts"]}]})
+                                if merged and merged[0].get("parts"):
+                                    target["parts"] = merged[0]["parts"]
                 except (ValueError, subprocess.TimeoutExpired):
                     pass  # The first location remains playable.
             proposal_path = image_path.parent / "proposals.json"
             proposal_path.write_text(json.dumps({
                 "artwork": artwork,
                 "preprocessing": preprocessing,
+                "region_taxonomy": REGION_TAXONOMY,
                 "regions": proposals,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -635,27 +1093,47 @@ async def analyze_job(job_id: str, image_path: Path, statement: str, preprocessi
             if sam.returncode != 0:
                 raise RuntimeError(sam.stderr.strip()[-900:] or "Mask generation failed")
 
-            manifest_path = result_dir / "regions.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads((result_dir / "regions.json").read_text(encoding="utf-8"))
+            # Preserve any motif independently discovered by SAM 3 at its
+            # original index, so the second pass can safely reuse those masks.
+            if sam3_ready:
+                semantic = json.loads((sam3_dir / "regions.json").read_text(encoding="utf-8"))
+                for record in semantic:
+                    if "proposal" in record and record["index"] == len(proposals):
+                        proposals.append(record["proposal"])
+            job.update(stage="segment", message="Checking region categories against the masks…", progress=68)
+            await review_region_categories(result_dir, manifest, image_path.parent / "region-review-output.txt")
+            job.update(message="Checking for missed painted areas…", progress=70)
+            try:
+                result_dir, manifest = await recover_region_coverage(result_dir, manifest, job)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass  # A failed coverage pass leaves the first partition usable.
+            try:
+                result_dir, manifest = await recover_local_details(result_dir, manifest, job)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass  # Keep the verified partition if detail analysis fails.
+            if not manifest["regions"]:
+                raise RuntimeError("The analysis could not find a playable painted region.")
             job.update(stage="music", message="Preparing the algorithmic music system…", progress=92)
             processed_image = manifest.get("processed_image", "artwork.png")
-            music_plan = derive_music_plan(
-                gems_profile,
-                result_dir / processed_image,
-                statement,
-            )
+            result_url = f"/runtime/jobs/{job_id}/{result_dir.name}"
             manifest.update({
                 "analysis_id": job_id,
-                "image_url": f"/runtime/jobs/{job_id}/result/{processed_image}",
+                "image_url": f"{result_url}/{processed_image}",
                 "status": "ready",
+                "region_layout": "by_category",
+                "proposal_source": PROPOSAL_CHECKPOINTS[PROPOSAL_MODEL][1],
                 "artist_statement": statement,
-                "music_plan": music_plan,
-                "gems_profile": gems_profile,
+                "statement_colors": raw_analysis.get("statement_colors", []),
             })
             for region in manifest["regions"]:
-                region["visual_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['visual_mask']}"
-                region["hit_mask_url"] = f"/runtime/jobs/{job_id}/result/{region['hit_mask']}"
-            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                region["visual_mask_url"] = f"{result_url}/{region['visual_mask']}"
+                region["hit_mask_url"] = f"{result_url}/{region['hit_mask']}"
+            final_manifest = result_dir.parent / "result" / "regions.json"
+            saved_manifest = json.dumps(manifest, ensure_ascii=False, indent=2)
+            (result_dir / "regions.json").write_text(saved_manifest, encoding="utf-8")
+            if final_manifest.parent != result_dir:
+                final_manifest.write_text(saved_manifest, encoding="utf-8")
             job.update(status="ready", stage="ready", message="Image regions and algorithmic music system are ready.", progress=100, result=manifest)
         except Exception as exc:
             job.update(status="error", stage="error", message=str(exc), progress=100)
@@ -704,11 +1182,6 @@ async def api_analyze(
     if not data:
         raise HTTPException(status_code=400, detail="The image file is empty.")
 
-    # Reuse the prepared demo only when no statement needs interpreting. A
-    # statement should always reach Qwen so it can influence the region reading.
-    if not statement.strip() and hashlib.sha256(data).digest() == hashlib.sha256(DEMO_IMAGE.read_bytes()).digest():
-        return JSONResponse(demo_payload())
-
     job_id = uuid.uuid4().hex[:12]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True)
@@ -746,66 +1219,8 @@ async def api_analyze_status(job_id: str) -> JSONResponse:
     return JSONResponse(job)
 
 
-@app.get("/api/state")
-async def api_state() -> JSONResponse:
-    return JSONResponse(latest_state)
-
-
-@app.get("/api/external-output")
-async def api_external_output() -> JSONResponse:
-    """Return the saved routing configuration, available ports, and activity."""
-    return JSONResponse(await asyncio.to_thread(external_output.public_state))
-
-
-@app.put("/api/external-output")
-async def api_update_external_output(configuration: dict[str, Any]) -> JSONResponse:
-    try:
-        saved = await asyncio.to_thread(external_output.save, configuration)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return JSONResponse({"config": saved, "activity": external_output.last_activity})
-
-
-@app.post("/api/external-output/test/{protocol}")
-async def api_test_external_output(protocol: str) -> JSONResponse:
-    try:
-        activity = await asyncio.to_thread(external_output.test, protocol.lower())
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return JSONResponse({"activity": activity})
-
-
-@app.websocket("/ws/events")
-async def ws_events(websocket: WebSocket) -> None:
-    await websocket.accept()
-    event_clients.add(websocket)
-    try:
-        await websocket.send_json({"type": "connected", "message": "Street Art control stream ready"})
-        while True:
-            try:
-                message = await websocket.receive_json()
-            except ValueError:
-                continue
-            if isinstance(message, dict) and message.get("type") in ("pointer_state", "scan_state"):
-                latest_state.clear()
-                latest_state.update(message)
-                await asyncio.to_thread(external_output.process, message)
-                for client in tuple(event_clients):
-                    if client is websocket:
-                        continue
-                    try:
-                        await client.send_json(message)
-                    except Exception:
-                        event_clients.discard(client)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        event_clients.discard(websocket)
-
-
 @app.on_event("shutdown")
 async def clean_old_jobs() -> None:
-    external_output.close()
     # Uploads are demo-session data; keep recent results so the page can reload.
     cutoff = time.time() - 24 * 60 * 60
     for directory in JOBS_DIR.iterdir():

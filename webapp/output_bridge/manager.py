@@ -151,6 +151,7 @@ class ExternalOutputManager:
         self._last_region: str | None = None
         self._last_output_mode: str | None = None
         self._last_voice_events: dict[str, str] = {}
+        self._last_transport: Any = None
         self._last_performance_cc: dict[tuple[int, int], int] = {}
         self._lock = threading.RLock()
         self.last_activity: dict[str, Any] = {
@@ -316,6 +317,8 @@ class ExternalOutputManager:
             region_entered = bool(region_id and (region_id != self._last_region or mode_changed))
             if mode_changed:
                 self._last_voice_events.clear()
+                self._cancel_pending_midi()
+                self._last_transport = None
             self._last_region = region_id
             self._last_output_mode = output_mode
             now = time.monotonic()
@@ -358,6 +361,12 @@ class ExternalOutputManager:
             return
         active_ids: set[str] = set()
         active_channels: set[int] = set()
+        scheduled = _nested(frame, "music.scheduledEvents")
+        transport = _nested(frame, "music.transportId")
+        if isinstance(scheduled, list) and transport != self._last_transport:
+            self._cancel_pending_midi()
+            self._last_transport = transport
+            self._last_voice_events.clear()
         for voice in voices:
             if not isinstance(voice, dict):
                 continue
@@ -377,6 +386,11 @@ class ExternalOutputManager:
                         cc_value,
                     )
                     self._last_performance_cc[cc_key] = cc_value
+        for voice in scheduled if isinstance(scheduled, list) else voices:
+            if not isinstance(voice, dict):
+                continue
+            voice_region = str(voice.get("regionId") or region_id or "voice")
+            channel = int(_clamp(_number(voice.get("channel"), 1), 1, 16))
             event_id = str(voice.get("eventId") or "")
             notes = voice.get("notes")
             if not isinstance(notes, list):
@@ -387,17 +401,24 @@ class ExternalOutputManager:
                 self._last_voice_events[voice_region] = event_id
             velocity = _clamp(_number(voice.get("velocity"), 96), 1, 127)
             bpm = max(20, _number(_nested(frame, "music.bpm"), 72))
-            duration = max(.04, _number(voice.get("durationBeats"), .25) * 60 / bpm)
+            duration_beats = _number(voice.get("durationBeats"), .25)
+            durations = voice.get("noteDurations") if isinstance(voice.get("noteDurations"), dict) else {}
+            velocities = voice.get("noteVelocities") if isinstance(voice.get("noteVelocities"), dict) else {}
             # Extended open voicings can contain a triad plus 7th, 9th, 11th
             # or 13th. Preserve the same chord that Web Audio receives.
             for raw_note in notes[:8]:
                 note = int(_clamp(_number(raw_note, 60), 0, 127))
+                duration = max(.015, _number(durations.get(str(note)), duration_beats) * 60 / bpm)
+                note_velocity = _clamp(_number(velocities.get(str(note)), velocity), 1, 127)
                 self._send_midi(
-                    {"message": "note", "target": str(note), "channel": channel, "duration": duration},
-                    velocity,
+                    {"message": "note", "target": str(note), "channel": channel, "duration": duration,
+                     "startAtMs": voice.get("scheduledAtMs")},
+                    note_velocity,
                 )
         for inactive in set(self._last_voice_events) - active_ids:
             self._last_voice_events.pop(inactive, None)
+        if isinstance(scheduled, list):
+            self._last_transport = transport
         for cc_key in list(self._last_performance_cc):
             channel, cc_number = cc_key
             if channel in active_channels:
@@ -469,6 +490,7 @@ class ExternalOutputManager:
                 "value": max(1, data),
                 "channel": channel,
                 "duration": max(.04, min(12, _number(mapping.get("duration"), .12))),
+                "startAtMs": mapping.get("startAtMs"),
             }
         else:
             message = {"type": "cc", "control": target, "value": data, "channel": channel}
@@ -501,6 +523,15 @@ class ExternalOutputManager:
             "error": error,
         }
 
+    def _cancel_pending_midi(self) -> None:
+        if self._midi_port is None or self._midi_port.stdin is None:
+            return
+        try:
+            self._midi_port.stdin.write('{"type":"cancel"}\n')
+            self._midi_port.stdin.flush()
+        except (OSError, ValueError):
+            self._close_midi()
+
     def _close_midi(self) -> None:
         if self._midi_port is not None:
             try:
@@ -516,6 +547,7 @@ class ExternalOutputManager:
         self._midi_port = None
         self._midi_target = None
         self._last_performance_cc.clear()
+        self._last_transport = None
 
     def _close_outputs(self) -> None:
         self._close_midi()
