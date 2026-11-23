@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FM Preset Review · Street Art Sonification</title>
+  <link rel="stylesheet" href="./fm-preset-review.css?v=lead1">
+  <script type="module" src="./fm-preset-review.mjs?v=lead-selection1"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <div class="review-heading">
+        <div>
+          <h1 id="review-title">FM Preset Review</h1>
+          <p id="review-description">5 sounds per instrument or drum piece · 80 presets</p>
+        </div>
+        <a href="./fm-editor.html">FM Patch Editor ↗</a>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="save" id="save-bank" disabled>Save kept presets</button>
+        <span id="progress" role="status"></span>
+      </div>
+      <p id="save-status" role="status"></p>
+    </div>
+  </header>
+  <main class="wrap library">
+    <nav aria-label="Instrument and drum piece" id="voices"></nav>
+    <section class="selection" aria-labelledby="selection-title">
+      <div class="selection-heading">
+        <div>
+          <h2 id="selection-title">Lead Synth</h2>
+          <p>Same performance within each group · Level-matched previews</p>
+        </div>
+        <label class="filter"><span id="filter-label">Show</span>
+          <select id="filter">
+            <option value="all">All presets</option>
+            <option value="pending">Unreviewed</option>
+            <option value="keep">Kept</option>
+            <option value="reject">Rejected</option>
+          </select>
+        </label>
+      </div>
+      <section id="carried-section" class="review-group" aria-labelledby="carried-title" hidden>
+        <h3 id="carried-title">Previously kept</h3>
+        <div id="carried" class="preset-list"></div>
+      </section>
+      <h3 id="candidates-title" class="review-group-title" hidden>New candidates</h3>
+      <div id="presets"></div>
+      <p id="empty" hidden>No presets match this filter.</p>
+    </section>
+  </main>
+</body>
+</html>

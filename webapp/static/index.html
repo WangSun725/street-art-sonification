@@ -7,7 +7,7 @@
   <meta name="description" content="Explore street art through responsive visual contours and sound.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=auto-drums1">
+  <link rel="stylesheet" href="/static/styles.css?v=multitrack1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
@@ -201,10 +201,10 @@
           <button id="drawScanRanges" type="button" aria-pressed="false">Select ranges</button>
           <button id="undoScanRange" type="button" hidden>Undo last</button>
           <button id="clearScanRanges" type="button" hidden>Clear ranges</button>
-          <label>Voices
-            <select id="scanVoiceMode" aria-label="Scan voices">
+          <label>Region voices
+            <select id="scanVoiceMode" aria-label="Scan region voices">
               <option value="backing">Filtered backing</option>
-              <option value="crossing">Scan line only</option>
+              <option value="crossing">Regions at scan line</option>
             </select>
           </label>
           <small id="scanPathStatus" role="status" hidden></small>
@@ -251,7 +251,7 @@
             <div><span>FM brightness</span><meter min="0" max="100" value="0" aria-label="Current fm brightness" data-auto-control="brightness" data-auto-source="fm"></meter><output>—</output></div>
             <div><span>FM harmonics</span><meter min="0" max="100" value="0" aria-label="Current fm harmonics" data-auto-control="harmonicIntensity" data-auto-source="fm"></meter><output>—</output></div>
             <div><span>FM motion</span><meter min="0" max="100" value="0" aria-label="Current fm motion" data-auto-control="movement" data-auto-source="fm"></meter><output>—</output></div>
-            <div><span>FM pan</span><meter min="0" max="100" value="0" aria-label="Current fm pan" data-auto-control="pan" data-auto-source="fm"></meter><output>—</output></div>
+            <div><span>Stereo pan</span><meter min="0" max="100" value="0" aria-label="Current stereo pan" data-auto-control="pan" data-auto-source="fm"></meter><output>—</output></div>
           </div>
           <details class="effect-adjustments">
             <summary>Shared FX</summary>
@@ -269,7 +269,9 @@
       </section>
 
       <section class="control-section collapsible-section" data-collapsible aria-label="FM instrument sound">
-        <div class="section-heading collapsible-heading"><h2>FM Instruments</h2><div class="section-heading-actions"></div></div>
+        <div class="section-heading collapsible-heading"><h2>FM Instruments</h2><div class="section-heading-actions">
+          <a id="mixReviewLink" class="mix-review-link" href="/static/mix-review.html" target="_blank" rel="noopener" hidden>Mix review ↗</a>
+        </div></div>
         <div class="collapsible-content">
           <div class="fm-role-buttons" id="fmRoleButtons" role="group" aria-label="Choose an FM instrument"></div>
           <div class="fm-role-settings knob-grid">
@@ -279,6 +281,7 @@
           </div>
           <details class="effect-adjustments">
             <summary>Instrument effects</summary>
+            <p id="instrumentEffectsNote" hidden></p>
             <div class="knob-grid">
               <label>Delay<input type="range" data-instrument-send="delay" min="0" max="100" aria-label="Instrument delay send"><output></output></label>
               <label>Reverb<input type="range" data-instrument-send="reverb" min="0" max="100" aria-label="Instrument reverb send"><output></output></label>
@@ -289,7 +292,7 @@
           </details>
           <details id="fmPatchEditor" class="fm-patch-editor">
             <summary>Edit FM patch</summary>
-            <p>Patch changes apply to new notes.</p>
+            <p id="fmPatchSummary">Patch changes apply to new notes.</p>
             <div id="fmPatchFields"></div>
             <button id="resetFmPatch" type="button">Reset patch</button>
             <a href="/static/fm-editor.html" target="_blank" rel="noopener">Open FM Patch Editor</a>
@@ -305,6 +308,13 @@
         <div class="collapsible-content">
           <input id="volumeSlider" type="range" min="0" max="100" value="70" step="1" aria-label="Output volume">
           <div class="volume-scale" aria-hidden="true"><span>Quiet</span><span>Loud</span></div>
+          <details class="multitrack-output" id="multitrackOutput">
+            <summary>Multitrack Output</summary>
+            <label>Audio device <select aria-label="Multitrack audio device"></select></label>
+            <button type="button" disabled>Connect</button>
+            <small role="status">Disconnected</small>
+            <ol aria-label="Stereo output pairs"></ol>
+          </details>
         </div>
       </section>
 
@@ -329,7 +339,6 @@
             <summary>Artwork settings</summary>
             <p id="artworkMusicDetails">Waiting for analysis.</p>
           </details>
-          <p id="backingDrumStatus" class="backing-drum-status" hidden>Backing drums added automatically</p>
         </div>
       </section>
 
@@ -361,6 +370,17 @@
         <div class="collapsible-content">
           <p id="regionInstrumentHelp" class="region-instrument-help" hidden>While exploring with the mouse, click a card to focus that part. In paused Scan with Link off, click a card to hear its loop by itself. Use the menu to change its instrument.</p>
           <div id="regionList" class="region-list" aria-label="Detected regions"></div>
+        </div>
+      </section>
+
+      <section class="control-section collapsible-section" data-collapsible aria-labelledby="accompanimentHeading">
+        <div class="section-heading inline collapsible-heading">
+          <h2 id="accompanimentHeading">Accompaniment</h2>
+          <div class="section-heading-actions"></div>
+        </div>
+        <div class="collapsible-content">
+          <p id="accompanimentEmpty" class="accompaniment-empty">No accompaniment</p>
+          <ul id="accompanimentList" class="region-list accompaniment-list" role="list" aria-live="polite" hidden></ul>
         </div>
       </section>
 
@@ -403,7 +423,8 @@
             <div><dt>Tempo</dt><dd>Grayscale brightness and RGB chroma contribute equally to a color’s tempo score. The app uses the colors named in the statement, counts an emphasized color twice, and uses reference RGB for any missing color. Without named colors, it weights the two largest color groups by area. This gives a starting tempo on a 72–144 BPM scale.</dd></div>
             <div><dt>Key and mode</dt><dd>The largest colored hue sector sets the root. The 12 sectors map to the 12 chromatic notes, starting with red for C. A tie goes to the brighter sector. A grayscale artwork defaults to C. Mean grayscale at or above 127.5 selects major. Lower values select natural minor.</dd></div>
             <div><dt>Harmony</dt><dd>Dominant hue and mode choose a four-bar progression in 4/4. All pitched parts share one chord per bar.</dd></div>
-            <div><dt>Rhythm and melody</dt><dd>The proportion of adjacent pixels with a strong grayscale change puts each region in a sparse, medium or dense group. Each instrument draws from its own patterns. The lead selects a four-bar melody by how well its accented, held and final notes fit the shared chords, and transposes it to the artwork’s key.</dd></div>
+            <div><dt>Rhythm and melody</dt><dd>The proportion of adjacent pixels with a strong grayscale change puts each region in a sparse, medium or dense group. Each instrument draws from its own patterns. The drum phrase ends with a short tom fill in its fourth bar. The lead selects a four-bar melody by how well its accented, held and final notes fit the shared chords, and transposes it to the artwork’s key.</dd></div>
+            <div><dt>Chord rhythm</dt><dd>One chord instrument is drawn for the artwork. Guitar, Keys / Mallet, FM Organ and Pad favor patterns whose attacks align with that instrument in each direction. Each part keeps its own note lengths.</dd></div>
           </dl>
           <p>Use <b>Global System</b> to adjust BPM, root or mode for the whole ensemble.</p>
         </li>
@@ -416,15 +437,18 @@
             </section>
             <section>
               <h4>Eye tracking</h4>
-              <p>Calibrate WebGazer using the on-screen targets. Looking at the artwork fades in the ensemble and opens the filter on the region you look at. Clear horizontal gaze motion selects A or B just like the mouse. Looking away fades the ensemble out.</p>
+              <p>Calibrate in the windowed view and then in fullscreen. Each view uses its own calibration. Looking at the artwork fades in the ensemble and opens the filter on the region you look at. Clear horizontal gaze motion selects A or B just like the mouse. Looking away fades the ensemble out.</p>
             </section>
             <section>
               <h4>Scan</h4>
-              <p>Forward uses A and reverse uses B. They share harmony and use different lead melodies. Each range takes whole bars on the shared clock. During playback, use Select ranges and drag left or right to insert a pass. Filtered backing opens parts near the scan line. Scan line only rounds each crossing to playable bars.</p>
+              <p>Forward uses A and reverse uses B on the shared clock. Each part picks both phrases from the same density band. B uses a different phrase from A. Filtered backing opens region parts near the scan line. Regions at scan line rounds each crossing to playable bars.</p>
+              <p>At a change of scan direction, continuing drums keep the outgoing pattern for one beat. A continuing bass plays the current chord root on that beat, with a short fade between sounds. The outgoing lead fades out, and pads can keep ringing when the chord stays the same.</p>
+              <p>Edge density along each four-bar stretch selects how many unassigned instruments play accompaniment. Unassigned drums enter first. During playback, use Select ranges and drag left or right to insert a pass.</p>
+              <p>Accompaniment lists the active parts during playback. While paused, click an instrument in that panel to preview its loop.</p>
             </section>
             <section>
               <h4>Link</h4>
-              <p>While the scan is idle, the mouse or gaze chooses A or B. Press Start to bring in the scan on a downbeat. During the scan the path chooses A or B for the entire ensemble. Mouse and gaze control filter focus and local effects on those same parts. Pausing or finishing the scan returns to exploration.</p>
+              <p>While idle, mouse or gaze direction chooses A or B for the ensemble. During a scan, the path sets the default. A clear gaze movement onto a new region opens its filter and switches that instrument to A (right) or B (left) on the next available bar. When you look away, the instrument returns to the scan's version on a bar line. The mouse still controls filter focus and local effects.</p>
             </section>
           </div>
           <p>The ensemble normally fades in over <b>2 seconds</b> and out over <b>3 seconds</b>. The focus filter opens from <b>900 Hz</b> toward <b>20 kHz</b>, making the part clearer.</p>
@@ -442,15 +466,16 @@
         </li>
         <li>
           <h3>Web audio and visual feedback</h3>
+          <p>Each new artwork draws two FM sounds for every instrument and drum piece. Arrangement A and B use their own sounds, switched on the same bar line as their phrases. Save Preset stores both sound sets.</p>
           <p>The browser schedules notes on a shared clock and plays them through a four-operator FM engine. If no region plays Drums, the ensemble adds a synchronized drum track. Each instrument has its own patch, volume and effects controls. Contours and cards show which regions have focus. <b>Live FM and Effects</b> shows their current controls.</p>
         </li>
       </ol>
     </section>
   </div>
 
-  <div id="calibrationOverlay" class="calibration-overlay" hidden>
+  <div id="calibrationOverlay" class="calibration-overlay" role="dialog" aria-modal="true" aria-labelledby="calibrationStep" hidden>
     <div class="calibration-copy">
-      <span>WEBGAZER · EYE CALIBRATION</span>
+      <span id="calibrationStep">1 of 2 · Windowed</span>
       <strong>Keep your head still. Look at each target while clicking it five times.</strong>
       <small id="calibrationProgress" aria-live="polite">Point 1 of 12 · 0 / 5 clicks</small>
     </div>
@@ -462,13 +487,19 @@
   <input id="presetFile" type="file" accept=".json,application/json" hidden>
   <script src="/static/vendor/webgazer/webgazer.js?v=3.5.3-local1" defer></script>
   <script type="module">
-    import * as composition from "/static/artwork-composition.mjs?v=lead-contrast1";
-    import * as fm from "/static/fm-patches.mjs?v=performance-mix1";
-    import * as scan from "/static/scan-path.mjs?v=live-ranges1";
+    import * as composition from "/static/artwork-composition.mjs?v=chord-rhythm1";
+    import * as fm from "/static/fm-patches.mjs?v=electronic-patches1";
+    import * as fmBank from "/static/fm-preset-bank.mjs?v=electronic-patches1";
+    import fmGains from "/static/fm-performance-gains.mjs?v=lead-selection1";
+    import * as scan from "/static/scan-path.mjs?v=scan-accompaniment1";
     import * as presets from "/static/performance-preset.mjs?v=region-instruments1";
+    import * as multitrack from "/static/multitrack-output.mjs?v=multitrack1";
     window.StreetArtComposition = composition;
-    window.StreetArtStudio = { fm, scan, presets };
-    await import("/static/app.js?v=auto-drums1");
+    window.StreetArtStudio = { fm, fmBank, fmGains, scan, presets, multitrack };
+    await import("/static/app.js?v=scan-turnaround1");
+    fetch("/runtime/mix-review/manifest.json", { method: "HEAD", cache: "no-store" })
+      .then(response => { document.getElementById("mixReviewLink").hidden = !response.ok; })
+      .catch(() => {});
   </script>
 </body>
 </html>

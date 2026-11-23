@@ -136,6 +136,7 @@ export const instrumentPresets = {
 
 export const drumPresets = {
   36: [
+    preset("Short Thump", { fundamental: 46, sweep: 146, sweepRate: 84, decay: 32, click: .82 }),
     preset("Sub Kick", { fundamental: 43, sweep: 84, decay: 10, click: .25, level: .88 }),
     preset("Punch Kick", { waveform: "triangle", fundamental: 55, sweep: 190, sweepRate: 72, decay: 23, click: 1.45 }),
     preset("Distorted Kick", { waveform: "sawtooth", fundamental: 47, sweep: 145, decay: 12, drive: 2.9, "cutoff.1": 3700, level: .65 }),

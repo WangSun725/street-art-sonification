@@ -1,0 +1,76 @@
+:root {
+  color-scheme: light;
+  font-family: "Avenir Next", system-ui, sans-serif;
+  color: #222626;
+  background: #eceae4;
+  --card: #fcfaf5;
+  --ink: #222626;
+  --muted: #5e625e;
+  --line: #d7d2c7;
+  --red: #ad402e;
+  --red-wash: #f3e5df;
+}
+
+* { box-sizing: border-box; }
+body, h1, h2, h3, p { margin: 0; }
+button, select { font: inherit; }
+button, select {
+  border: 1px solid var(--line);
+  border-radius: .4rem;
+  background: var(--card);
+  color: var(--ink);
+}
+button { padding: .55rem .75rem; cursor: pointer; }
+button:enabled:hover { border-color: var(--red); }
+:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+[hidden] { display: none !important; }
+a { text-underline-offset: .2em; color: inherit; }
+.review { max-width: 1180px; margin: 0 auto; padding: 3rem 2rem; }
+.heading { display: flex; justify-content: space-between; align-items: end; gap: 1rem; padding-bottom: 1.25rem; border-bottom: 2px solid var(--ink); }
+.project-name { font-size: .8rem; font-weight: 725; letter-spacing: .08em; text-transform: uppercase; color: var(--red); }
+h1 { font-size: clamp(2.6rem, 6vw, 4.8rem); line-height: 1; letter-spacing: -.06em; margin: .3rem 0 .5rem; }
+.project-link { white-space: nowrap; font-size: .92rem; font-weight: 680; }
+#summary { font-size: .95rem; color: var(--muted); }
+.library { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 1.35rem; margin-top: 1.4rem; }
+nav { display: grid; gap: .4rem; align-content: start; align-self: start; position: sticky; top: 1rem; }
+nav button { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; min-height: 2.6rem; font-size: .88rem; text-align: left; font-weight: 620; }
+nav button[aria-pressed="true"] { background: var(--ink); color: white; border-color: var(--ink); }
+nav small { font-size: .72rem; font-weight: 500; opacity: .8; }
+.instrument { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: .55rem; padding: 1.1rem; }
+.section-head { display: flex; gap: .8rem; justify-content: space-between; flex-wrap: wrap; align-items: end; padding-bottom: .85rem; border-bottom: 1px solid var(--line); }
+h2 { font-size: 1.6rem; letter-spacing: -.035em; line-height: 1.08; margin-bottom: .28rem; }
+#patch, .guide, #status { color: var(--muted); font-size: .88rem; }
+.filters { display: flex; flex-wrap: wrap; gap: .65rem; }
+.filters label { display: grid; gap: .15rem; font-size: .78rem; color: var(--muted); }
+select { min-height: 2.2rem; padding: .3rem .6rem; }
+.playback { display: grid; gap: .35rem; padding: .7rem 0; border-bottom: 1px solid var(--line); }
+.playback > div { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; font-size: .84rem; }
+.playback audio { width: 100%; height: 2.6rem; }
+.guide { padding: .65rem 0 .2rem; line-height: 1.4; }
+#status { padding: .45rem 0; }
+#status:empty { display: none; }
+.pattern { display: grid; grid-template-columns: minmax(200px, 1.3fr) minmax(145px, 1fr) 4.25rem; gap: .85rem; align-items: center; padding: .64rem .4rem; border-bottom: 1px solid var(--line); }
+.pattern[data-playing="true"] { background: var(--red-wash); }
+.pattern:last-child { border-bottom: 0; }
+.pattern h3 { font-size: .92rem; font-weight: 700; overflow-wrap: anywhere; }
+.pattern p { margin-top: .13rem; font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+.pattern button { font-weight: 650; }
+.pattern[data-playing="true"] button { background: var(--red); border-color: var(--red); color: white; }
+.steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .36rem; }
+.beat { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
+.slot { display: block; height: 1.05rem; background: #e1ded5; border-radius: .12rem; }
+.slot[data-hit="true"] { background: var(--red); }
+.slot[data-accent="true"] { background: #66291e; }
+
+@media (max-width: 800px) {
+  .review { padding: 1.5rem 1rem 2rem; }
+  .library { grid-template-columns: 1fr; gap: .8rem; }
+  nav { grid-template-columns: repeat(2, 1fr); position: static; }
+}
+@media (max-width: 530px) {
+  .instrument { padding: .8rem; }
+  .pattern { grid-template-columns: 1fr 4.25rem; gap: .45rem .65rem; }
+  .steps { grid-column: 1; grid-row: 2; max-width: 275px; }
+  .pattern button { grid-column: 2; grid-row: 1 / 3; }
+  .heading { align-items: start; }
+}

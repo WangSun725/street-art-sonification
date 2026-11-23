@@ -1,4 +1,4 @@
-import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=patch-editor3";
+import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=short-kick1";
 
 export const FACTORY_PATCHES = {
   drums: {
@@ -92,6 +92,7 @@ export const PROJECT_PRESET_NAMES = {
     percussion_texture: "Bright Sand",
   },
   drums: {
+    36: "Short Thump",
     38: "Dry Snare",
     39: "Tight Clap",
     42: "Loose Hat",
@@ -167,6 +168,22 @@ const shaping = [
   field("combFeedback", "Comb feedback", 0, .95, .01, "", .55),
 ];
 
+const optional = control => ({ ...control, optional: true });
+const pulseWidthMotion = optional(field("pulseWidthMotion", "Pulse width movement", 0, .28, .01, "", 0));
+const gate = [
+  optional(field("gateDepth", "Pulse gate depth", 0, 1, .01, "", 0)),
+  optional(field("gateRate", "Pulse gate rate", .5, 8, .25, "×/beat", 2)),
+  optional(field("ringMix", "Ring modulation mix", 0, 1, .01, "", 0)),
+  optional(field("ringRatio", "Ring modulation ratio", .25, 6, .01, "×", 1.5)),
+];
+const drumCircuit = { label: "Electronic shaping", fields: [
+  optional({ key: "circuit", label: "Circuit", fallback: "clean", options: {
+    clean: "Clean", clip: "Clip", steps: "Digital hold", gate: "Pulse gate", ring: "Ring modulation", bloom: "Reverse bloom",
+  } }),
+  optional(field("circuitMix", "Circuit mix", 0, 1, .01, "", 0)),
+  optional(field("circuitRate", "Circuit rate", 4, 14000, 1, "Hz", 24)),
+] };
+
 export function fmGroups(role, { expanded = false } = {}) {
   if (!Object.hasOwn(PATCHES, role)) return [];
   const patch = PATCHES[role];
@@ -194,7 +211,9 @@ export function fmGroups(role, { expanded = false } = {}) {
       : patch.algorithm === "carriers" ? ["indices.1", "indices.2", "modDecay.1", "modDecay.2", "feedback"]
       : patch.algorithm === "branch" ? ["feedback"] : [];
     groups.push(
-      { label: "Operators and modulation", fields: operators.filter(control => !unused.includes(control.key)) },
+      { label: "Operators and modulation", fields: expanded
+        ? operators.map(control => unused.includes(control.key) ? optional(control) : control)
+        : operators.filter(control => !unused.includes(control.key)) },
       { label: "Filter", fields: filter },
       { label: "LFO", fields: motion },
     );
@@ -209,15 +228,20 @@ export function fmGroups(role, { expanded = false } = {}) {
         field("octaveBody", "Octave body", 0, 1, .01),
       ] });
     } else if (role !== "percussion_texture") {
-      groups.unshift({ label: "Operator waveforms", fields: Array.from({ length: 4 }, (_, index) =>
-        waveform(`waveforms.${index}`, `Operator ${index + 1} waveform`)) });
+      groups.unshift({ label: "Operator routing and waveforms", fields: [
+        optional({ key: "algorithm", label: "FM algorithm", options: {
+          serial: "Serial", parallel: "Parallel", branch: "Branch", carriers: "Stacked carriers", feedback: "Feedback",
+        } }),
+        ...Array.from({ length: 4 }, (_, index) => waveform(`waveforms.${index}`, `Operator ${index + 1} waveform`)),
+      ] });
       groups.push(
         { label: "Oscillator blend", fields: patch.sawWidth
-          ? [...oscillatorBlend, field("sawBlend", "Stereo saw blend", 0, 1, .01, "", 0)]
-          : oscillatorBlend },
+          ? [...oscillatorBlend, pulseWidthMotion, field("sawBlend", "Stereo saw blend", 0, 1, .01, "", 0)]
+          : [...oscillatorBlend, pulseWidthMotion] },
         { label: "Wave shaping", fields: shaping },
       );
     }
+    groups.push(role === "percussion_texture" ? drumCircuit : { label: "Electronic modulation", fields: gate });
   }
   return groups;
 }
@@ -230,9 +254,9 @@ export function fmDefaultValue(role, control, { factory = false } = {}) {
   return value ?? control.fallback;
 }
 
-export function normalizeFmPatch(role, values) {
+export function normalizeFmPatch(role, values, { keepDefaults = false } = {}) {
   return normalizeValues(fmGroups(role, { expanded: true }), values,
-    control => fmDefaultValue(role, control));
+    control => keepDefaults ? undefined : fmDefaultValue(role, control));
 }
 
 function normalizeValues(groups, values, defaultValue) {
@@ -263,8 +287,15 @@ const drumVoice = (label, defaults, fields) => ({
   groups: [
     { label: "Drum voice", fields },
     { label: "Filter and drive", fields: [{ ...filter[1], label: "Cutoff", min: 600 }, ...filter.slice(2)] },
+    drumCircuit,
   ],
 });
+const tomVoice = (label, fundamental, sweep, decayRate) => drumVoice(
+  label, { kind: "tom", fundamental, sweep, decay: decayRate, noise: .14, level: .30 }, [
+    waveform("waveform", "Head waveform"), hz("fundamental", "Body pitch", 45, 250),
+    hz("sweep", "Pitch drop", 0, 140), decay(8, 65), mix("noise", "Stick noise", .65), mix("level", "Level", .8),
+  ],
+);
 
 export const DRUM_VOICES = {
   36: drumVoice("Kick", { fundamental: 51, sweep: 142, sweepRate: 49, decay: 15, click: 1, level: .84 }, [
@@ -284,7 +315,10 @@ export const DRUM_VOICES = {
     field("level", "Level", 0, .4, .001),
   ]),
   42: drumVoice("Closed Hi-Hat", { decay: 28, metalPitch: 1, metal: .19, noise: .24, level: .11 }, hatFields()),
+  43: tomVoice("Low Tom", 78, 39, 23),
   46: drumVoice("Open Hi-Hat", { decay: 8, metalPitch: 1, metal: .19, noise: .24, level: .11 }, hatFields()),
+  47: tomVoice("Mid Tom", 110, 46, 26),
+  50: tomVoice("High Tom", 148, 48, 29),
 };
 
 function hatFields() {

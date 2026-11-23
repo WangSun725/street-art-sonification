@@ -1,12 +1,22 @@
-import { DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, applyFmPatch, normalizeDrumPatch, normalizeFmPatch } from "./fm-patches.mjs?v=performance-mix1";
+import { DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, applyFmPatch, normalizeDrumPatch, normalizeFmPatch } from "./fm-patches.mjs?v=electronic-patches1";
 
+// In Safari, reading the worklet global calls into WebKit. Read it once
+// for this context instead of looking it up for every sample of every voice.
+const SAMPLE_RATE = sampleRate;
 const TAU = Math.PI * 2;
 const MAX_VOICES = 40;
+const FULL_QUALITY_VOICES = 12;
+const CHORD_VOICES = new Set(["bass", "counter_synth", "guitar", "pad", "strings", "organ", "keys_mallet"]);
 const ANALOG_OFFSETS = [-1, -.48, 0, .48, 1];
 const ANALOG_WEIGHTS = [.16, .21, .26, .21, .16];
 const ANALOG_ALL = [0, 1, 2, 3, 4];
 const ANALOG_TRIO = [0, 2, 4];
 const NO_PITCH_ENVELOPE = [0, .05];
+const LEAD_GLIDE_SECONDS = .006;
+const LEAD_RETRIGGER_FADE_SECONDS = .012;
+const SCAN_TURN_LEAD_FADE_SECONDS = .12;
+const SCAN_TURN_BASS_FADE_SECONDS = .04;
+const LEAD_VIBRATO_LIMIT = .028;
 const CENT_RATIO = Math.LN2 / 1200;
 const SINE_TABLE_SIZE = 4096;
 const SINE_TABLE_MASK = SINE_TABLE_SIZE - 1;
@@ -16,11 +26,18 @@ const EXP_TABLE_SIZE = 4096;
 const EXP_TABLE_MAX = 16;
 const EXP_TABLE_SCALE = EXP_TABLE_SIZE / EXP_TABLE_MAX;
 const EXP_TABLE = new Float32Array(EXP_TABLE_SIZE);
+const SATURATION_TABLE_SCALE = 1024;
+const SATURATION_TABLE = new Float64Array(8 * SATURATION_TABLE_SCALE + 1);
+const KICK_CLICK_HIGHPASS = 1 - Math.exp(-TAU * 450 / SAMPLE_RATE);
+const KICK_CLICK_LOWPASS = 1 - Math.exp(-TAU * 3200 / SAMPLE_RATE);
 for (let index = 0; index < SINE_TABLE_SIZE; index++) {
   SINE_TABLE[index] = Math.sin(TAU * index / SINE_TABLE_SIZE);
 }
 for (let index = 0; index < EXP_TABLE_SIZE; index++) {
   EXP_TABLE[index] = Math.exp(-EXP_TABLE_MAX * index / EXP_TABLE_SIZE);
+}
+for (let index = 0; index < SATURATION_TABLE.length; index++) {
+  SATURATION_TABLE[index] = Math.tanh(index / SATURATION_TABLE_SCALE);
 }
 
 function fastSin(phase) {
@@ -62,8 +79,13 @@ function waveformTable(shape, frequency) {
   const bank = OPERATOR_TABLES[shape];
   if (!bank) return undefined;
   // Leave room for modulation sidebands above the unmodulated oscillator.
-  const partials = clamp(Math.floor(sampleRate * .38 / Math.max(1, frequency)), 1, 64);
+  const partials = clamp(Math.floor(SAMPLE_RATE * .38 / Math.max(1, frequency)), 1, 64);
   return bank[31 - Math.clz32(partials)];
+}
+
+function tablesForPatch(patch, frequency) {
+  return patch.waveforms?.map((shape, index) =>
+    waveformTable(shape, frequency * patch.ratios[index] * 1.5));
 }
 
 function oscillatorSample(phase, table) {
@@ -82,6 +104,28 @@ function fastExpNeg(value) {
   if (value <= 0) return 1;
   if (value >= EXP_TABLE_MAX) return 0;
   return EXP_TABLE[(value * EXP_TABLE_SCALE) | 0];
+}
+
+function saturate(value) {
+  // Interpolation preserves the tanh curve to within 3e-7.
+  const position = Math.abs(value) * SATURATION_TABLE_SCALE;
+  if (position >= SATURATION_TABLE.length - 1) return value < 0 ? -1 : 1;
+  const index = position | 0;
+  const low = SATURATION_TABLE[index];
+  const shaped = low + (SATURATION_TABLE[index + 1] - low) * (position - index);
+  return value < 0 ? -shaped : shaped;
+}
+
+function updatePitchedControls(voice) {
+  const { patch, gemsBank: bank, brightness, saturation, texture, speed, chorus, harmonicIntensity } = voice;
+  const controls = voice.pitchedControls ??= {};
+  const depth = (patch.vibrato[0] + chorus * .08 + speed * .025) * bank.vibrato * bank.lfo1Depth;
+  controls.vibratoDepth = voice.tunedLead ? Math.min(LEAD_VIBRATO_LIMIT, depth) : depth;
+  controls.colourIndex = .46 + brightness * .38 + saturation * .16 + speed * .28 + harmonicIntensity * .34;
+  controls.cutoff = (patch.cutoff[0] + (patch.cutoff[1] - patch.cutoff[0]) * brightness ** 1.45) * bank.cutoff;
+  controls.analogDetune = (patch.analogDetune || 0) * bank.stereo * (.62 + chorus * .56 + texture * .18);
+  controls.operatorDetune = (texture * .0007 + chorus * .0018) * bank.detune * bank.stereo;
+  controls.drive = patch.drive * bank.drive * (1 + saturation * .45 + harmonicIntensity * .35);
 }
 
 // Genre voices use their own instrument designs; GEMS and visual controls
@@ -385,20 +429,22 @@ const ROLE_GEMS_PROFILES = {
   },
 };
 
+const ARTWORK_BANKS = Object.fromEntries(Object.keys(PATCHES).map(role => {
+  const sustained = role === "pad" || role === "strings";
+  const percussion = role === "drums" || role === "percussion_texture";
+  const acid = role === "bass";
+  return [role, {
+    ...Object.fromEntries(BANK_PARAMETERS.map(parameter => [parameter, 1])),
+    cutoff: acid ? .96 : percussion ? .94 : .78, drive: acid ? 1.10 : .88,
+    feedback: acid ? 1.02 : .75, noise: percussion ? .90 : .56, release: sustained ? 1.26 : .99,
+    lfo1Rate: acid ? 1.00 : .79, lfo1Depth: sustained ? 1.18 : .86, lfo2Depth: .80,
+    detune: sustained ? 1.22 : .99, stereo: sustained ? 1.24 : 1.04, level: .96,
+    fold: acid ? .92 : .65, crush: .30, glitch: .35,
+  }];
+}));
+
 function blendGemsBank(value, role = "lead_synth") {
-  if (value === "artwork") {
-    const sustained = role === "pad" || role === "strings";
-    const percussion = role === "drums" || role === "percussion_texture";
-    const acid = role === "bass";
-    return {
-      ...Object.fromEntries(BANK_PARAMETERS.map(parameter => [parameter,1])),
-      cutoff: acid ? .96 : percussion ? .94 : .78, drive: acid ? 1.10 : .88,
-      feedback: acid ? 1.02 : .75, noise: percussion ? .90 : .56, release: sustained ? 1.26 : .99,
-      lfo1Rate: acid ? 1.00 : .79, lfo1Depth: sustained ? 1.18 : .86, lfo2Depth: .80,
-      detune: sustained ? 1.22 : .99, stereo: sustained ? 1.24 : 1.04, level: .96,
-      fold: acid ? .92 : .65, crush: .30, glitch: .35,
-    };
-  }
+  if (value === "artwork") return { ...(ARTWORK_BANKS[role] ?? ARTWORK_BANKS.lead_synth) };
   const source = value && typeof value === "object" ? value : {};
   const weights = GEMS_DIMENSIONS.map((name) => clamp(Number(source[name]) || 0, 0, 1));
   let total = weights.reduce((sum, weight) => sum + weight, 0);
@@ -433,15 +479,16 @@ function envelope(time, duration, settings) {
   const sustain = settings[2];
   const release = settings[3];
   if (time < 0) return 0;
-  if (time < attack) return time / Math.max(.0005, attack);
-  if (time < attack + decay) {
-    const phase = (time - attack) / Math.max(.0005, decay);
-    return 1 + (sustain - 1) * phase;
+  const heldTime = Math.min(time, duration);
+  let level = sustain;
+  if (heldTime < attack) {
+    level = heldTime / Math.max(.0005, attack);
+  } else if (heldTime < attack + decay) {
+    const phase = (heldTime - attack) / Math.max(.0005, decay);
+    level = 1 + (sustain - 1) * phase;
   }
-  const releaseStart = Math.max(attack + decay, duration);
-  if (time < releaseStart) return sustain;
-  if (time < releaseStart + release) return sustain * (1 - (time - releaseStart) / release);
-  return 0;
+  if (time < duration) return level;
+  return level * Math.max(0, 1 - (time - duration) / Math.max(.0005, release));
 }
 
 function modulationEnvelope(time, decay, sustain, attack = .004) {
@@ -453,7 +500,7 @@ function bassVolumeGain(voice, time) {
   const { volumeLfoDepth: depth = 0, volumeLfoRate: rate = 2 } = voice.patch || PATCHES.bass;
   if (depth === 0) return 1;
   const beatSeconds = voice.beatSeconds ?? .5;
-  const beatAtStart = voice.beatAtStart ?? voice.startFrame / sampleRate / beatSeconds;
+  const beatAtStart = voice.beatAtStart ?? voice.startFrame / SAMPLE_RATE / beatSeconds;
   const beat = beatAtStart + time / beatSeconds;
   const phase = TAU * ((beat * rate) % 1);
   return 1 - depth * .5 * (1 - fastCos(phase));
@@ -482,7 +529,8 @@ function bandLimitedSaw(phase, increment) {
 function bandLimitedPulse(phase, increment, width) {
   let sample = phase < width ? 1 : -1;
   sample += polyBlep(phase, increment);
-  sample -= polyBlep((phase - width + 1) % 1, increment);
+  const edge = phase - width;
+  sample -= polyBlep(edge < 0 ? edge + 1 : edge, increment);
   return sample;
 }
 
@@ -494,25 +542,29 @@ function wavefold(sample, amount) {
 
 // Output zero is the dry stereo mix. Single-output audition hosts still use just that mix.
 // Each optional stereo bus receives only the post-filter, post-fader signal sent to it.
-function writeSends(outputs, index, left, right, sends) {
-  if (sends.delayMix === undefined) {
-    outputs[1][0][index] += left * sends.delay;
-    outputs[1][1][index] += right * sends.delay;
-  } else {
-    // The two channels feed independent, hard-panned delay lines.
-    const mono = (left + right) * .5 * sends.delay;
-    outputs[1][0][index] += mono * (1 - sends.delayMix);
-    outputs[1][1][index] += mono * sends.delayMix;
+function writeSends(outputs, index, left, right, sends, voice) {
+  if (!voice.isKick && voice.role !== "bass") {
+    if (sends.delayMix === undefined) {
+      outputs[1][0][index] += left * sends.delay;
+      outputs[1][1][index] += right * sends.delay;
+    } else {
+      // The two channels feed independent, hard-panned delay lines.
+      const mono = (left + right) * .5 * sends.delay;
+      outputs[1][0][index] += mono * (1 - sends.delayMix);
+      outputs[1][1][index] += mono * sends.delayMix;
+    }
+    outputs[2][0][index] += left * sends.reverb;
+    outputs[2][1][index] += right * sends.reverb;
   }
-  outputs[2][0][index] += left * sends.reverb;
-  outputs[2][1][index] += right * sends.reverb;
   outputs[3][0][index] += left * sends.chorus;
   outputs[3][1][index] += right * sends.chorus;
 }
 
 class StreetArtFMProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor({ processorOptions } = {}) {
     super();
+    this.stemPorts = new Map((processorOptions?.stemRoles ?? []).map((role, index) => [role, index + 4]));
+    this.stemsEnabled = false;
     this.voices = [];
     this.pendingNotes = [];
     this.presences = new Map();
@@ -520,17 +572,29 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     this.expression = new Map();
     this.instrumentPatches = new Map();
     this.drumPatches = new Map();
+    this.notePatches = new Map();
+    this.performancePatches = null;
     this.lastFrequencyByRole = new Map();
     this.frame = 0;
     this.kickEnvelope = 0;
     this.kickDuck = 0;
-    this.kickDecay = Math.exp(-1 / (sampleRate * .125));
-    this.duckAttack = 1 / (sampleRate * .006);
+    this.kickDecay = Math.exp(-1 / (SAMPLE_RATE * .125));
+    this.duckAttack = 1 / (SAMPLE_RATE * .006);
     this.port.onmessage = (event) => this.handleMessage(event.data || {});
   }
 
   handleMessage(message) {
+    if (message.type === "stems") {
+      this.stemsEnabled = message.enabled === true;
+      return;
+    }
+    if (message.type === "performance-patches") {
+      this.performancePatches = message.takes;
+      this.notePatches.clear();
+      return;
+    }
     if (message.type === "drum-patch" && Object.hasOwn(DRUM_VOICES, message.note)) {
+      this.notePatches.clear();
       const note = Number(message.note);
       const values = normalizeDrumPatch(note, message.values);
       if (Object.keys(values).length) {
@@ -541,17 +605,18 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       return;
     }
     if (message.type === "instrument-patch" && Object.hasOwn(PATCHES, message.role)) {
-      const values = normalizeFmPatch(message.role, message.values);
+      this.notePatches.clear();
+      const values = normalizeFmPatch(message.role, message.values, { keepDefaults: message.keepDefaults });
       if (Object.keys(values).length) this.instrumentPatches.set(message.role, values);
       else this.instrumentPatches.delete(message.role);
       return;
     }
-    if (message.type === "note") {
+    if (message.type === "note" || message.type === "music-bar") {
       const frame = Number.isFinite(message.time)
-        ? Math.round(message.time * sampleRate)
-        : this.frame + Math.round((Number(message.delay) || 0) * sampleRate);
-      if (Number.isFinite(message.time) && frame < this.frame - sampleRate * .08) return;
-      if (frame <= this.frame) this.addVoice({ ...message, delay: 0 });
+        ? Math.round(message.time * SAMPLE_RATE)
+        : this.frame + Math.round((Number(message.delay) || 0) * SAMPLE_RATE);
+      if (Number.isFinite(message.time) && frame < this.frame - SAMPLE_RATE * .08) return;
+      if (frame <= this.frame) this.startScheduledMessage({ ...message, delay: 0 }, this.frame);
       else {
         this.pendingNotes.push({ frame, message: { ...message, delay: 0 } });
         this.pendingNotes.sort((a, b) => a.frame - b.frame);
@@ -567,14 +632,15 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         active.add(String(item.id));
         const id = String(item.id);
         const current = this.regionMix.get(id) || { value: 0, target: 0 };
-        current.target = clamp(Number(item.mix) || 0, 0, 1);
+        current.target = clamp(Number(item.mix) || 0, 0, 2);
         current.cutoffTarget = Number.isFinite(item.scanCutoffHz) ? item.scanCutoffHz : undefined;
         this.regionMix.set(id, current);
       }
       for (const [id, mix] of this.regionMix) {
         if (!active.has(id)) mix.target = 0;
       }
-      this.pendingNotes = this.pendingNotes.filter((note) => active.has(String(note.message.regionId || "global")));
+      this.pendingNotes = this.pendingNotes.filter(({ message }) =>
+        message.type === "music-bar" || active.has(String(message.regionId || "global")));
     }
     if (message.type === "presence") this.updatePresences(message.regions || []);
     if (message.type === "expression") {
@@ -605,6 +671,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       if (!voice || voice.role !== role) {
         voice = {
           role,
+          reducedQuality: this.voices.length + this.presences.size >= FULL_QUALITY_VOICES,
           note,
           frequency: midiFrequency(note),
           targetFrequency: midiFrequency(note),
@@ -669,6 +736,45 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     }
   }
 
+  startScheduledMessage(message, frame) {
+    if (message.type === "music-bar") {
+      // A scheduled note may still be releasing at the next bar line.
+      for (const voice of this.voices) {
+        const reverse = voice.role === message.gazeTake?.role ? message.gazeTake.reverse : message.reverse;
+        const changedTake = typeof voice.reverseTake === "boolean" && voice.reverseTake !== reverse;
+        const newLeadTake = voice.role === "lead_synth" && changedTake;
+        const newBassAtTurn = message.turnaround && voice.role === "bass" && changedTake;
+        const newChord = Number.isFinite(voice.chordDegree) && Number.isFinite(message.chordDegree)
+          && voice.chordDegree !== message.chordDegree;
+        const leavingAccompaniment = voice.accompaniment && Array.isArray(message.accompaniment)
+          && !message.accompaniment.includes(voice.regionId);
+        if ((leavingAccompaniment || newLeadTake || newBassAtTurn || newChord) && voice.stopFrame == null) {
+          voice.stopFrame = frame;
+          if (newBassAtTurn) voice.stopFadeSeconds = SCAN_TURN_BASS_FADE_SECONDS;
+          else if (message.turnaround && newLeadTake) voice.stopFadeSeconds = SCAN_TURN_LEAD_FADE_SECONDS;
+          else if (leavingAccompaniment) voice.stopFadeSeconds = .07;
+        }
+      }
+      return;
+    }
+    this.addVoice(message, frame);
+  }
+
+  notePatch(role, take, drumNote, drumOverrides, drumFilter, overrides, genre, production) {
+    // Artwork notes share a patch until the corresponding preset or editor changes.
+    const key = !genre && !production
+      ? role + (drumOverrides ? ":" + drumNote : "") + (take ? take === this.performancePatches.A ? ":A" : ":B" : "")
+      : null;
+    if (key && this.notePatches.has(key)) return this.notePatches.get(key);
+    const base = applyFmPatch(productionPatch(genre, role, production), take ? take.instruments[role] : overrides);
+    const shaped = drumFilter ? applyFmPatch(base, Object.fromEntries(
+      Object.entries(drumOverrides).filter(([name]) => name === "cutoff.1" || name === "resonance" || name === "drive"),
+    )) : base;
+    const patch = take ? applyFmPatch(shaped, overrides) : shaped;
+    if (key) this.notePatches.set(key, patch);
+    return patch;
+  }
+
   addVoice(message, onsetFrame = this.frame) {
     const role = PATCHES[message.role] ? message.role : "lead_synth";
     const note = clamp(Number(message.note) || 60, 0, 127);
@@ -679,26 +785,54 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const targetFrequency = midiFrequency(note);
     const drumNote = Math.round(note);
     const drum = role === "drums" && message.kind !== "boundary" ? DRUM_VOICES[drumNote] : null;
+    const take = typeof message.reverseTake === "boolean"
+      ? this.performancePatches?.[message.reverseTake ? "B" : "A"]
+      : null;
     const drumOverrides = drum
-      ? this.drumPatches.get(drumNote) ?? (message.genre ? undefined : DRUM_DEFAULTS[drumNote])
+      ? this.drumPatches.get(drumNote) ?? take?.drums[drumNote] ?? (message.genre ? undefined : DRUM_DEFAULTS[drumNote])
       : undefined;
     const overrides = this.instrumentPatches.get(role);
-    const drumFilter = drumOverrides && (drumOverrides["cutoff.1"] !== undefined
+    const drumFilter = drumOverrides && (drumOverrides.circuit || drumOverrides["cutoff.1"] !== undefined
       || drumOverrides.resonance !== undefined || drumOverrides.drive !== undefined);
-    const production = productionPatch(message.genre, role, message.production);
-    const base = applyFmPatch(production, overrides);
-    const patch = drumFilter ? applyFmPatch(base, Object.fromEntries(
-      Object.entries(drumOverrides).filter(([key]) => key === "cutoff.1" || key === "resonance" || key === "drive"),
-    )) : base;
     const regionId = String(message.regionId || "global");
     const velocity = clamp(Number(message.velocity) || .7, 0, 1);
     const brightness = clamp(Number(controls.brightness ?? visual.brightness) || 0, 0, 1);
     const harmonicIntensity = clamp(Number(controls.harmonicIntensity) || 0, 0, 1);
+    const legatoLead = role === "lead_synth" && message.leadLegato === true;
+    const tunedLead = role === "lead_synth" && (legatoLead || message.gemsWeights === "artwork");
+    if (legatoLead) {
+      const previous = this.voices.findLast(voice => voice.role === role && voice.regionId === regionId);
+      if (previous && previous.note !== note) {
+        const age = (onsetFrame - previous.startFrame) / SAMPLE_RATE;
+        const connected = previous.stopFrame == null && previous.reverseTake === message.reverseTake
+          && Math.abs(previous.legatoToBeat - message.onsetBeat) < 1e-5;
+        if (connected && age >= 0 && Math.abs(age - previous.duration) <= .005) {
+          // Keep the oscillator phases and envelope of the note that's still held.
+          const stepwise = Math.abs(previous.note - note) <= 2;
+          previous.leadGlide = stepwise ? { from: previous.frequency, start: age } : null;
+          if (!stepwise) previous.frequency = targetFrequency;
+          previous.note = note;
+          previous.targetFrequency = targetFrequency;
+          previous.operatorTables = tablesForPatch(previous.patch, Math.max(previous.frequency, targetFrequency));
+          previous.targetVelocity = velocity;
+          previous.duration = age + duration;
+          previous.endTime = previous.duration + previous.ampSettings[3];
+          previous.legatoToBeat = message.legatoToBeat;
+          return;
+        }
+        if (age >= 0 && age < previous.endTime && (previous.stopFrame == null
+          || (previous.stopFrame === onsetFrame && previous.stopFadeSeconds == null))) {
+          previous.stopFrame = onsetFrame;
+          previous.stopFadeSeconds = LEAD_RETRIGGER_FADE_SECONDS;
+        }
+      }
+    }
     if (role === "bass" && delay === 0) {
       const previous = this.voices.findLast((voice) => voice.role === "bass" && voice.regionId === regionId);
       if (previous) {
-        const age = (onsetFrame - previous.startFrame) / sampleRate;
-        if (message.slide && previous.stopFrame == null && age >= 0 && age < previous.duration) {
+        const age = (onsetFrame - previous.startFrame) / SAMPLE_RATE;
+        const sameTake = !take || message.reverseTake === previous.reverseTake;
+        if (message.slide && sameTake && previous.stopFrame == null && age >= 0 && age < previous.duration) {
           previous.targetFrequency = targetFrequency;
           previous.glideSeconds = .024;
           previous.targetVelocity = velocity;
@@ -711,30 +845,40 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         }
         if (age >= 0 && age < previous.duration) {
           previous.duration = age;
-          previous.endTime = Math.max(age, previous.ampSettings[0] + previous.ampSettings[1]) + previous.ampSettings[3];
+          previous.endTime = age + previous.ampSettings[3];
         }
       }
     }
+    const patch = this.notePatch(role, take, drumNote, drumOverrides, drumFilter, overrides, message.genre, message.production);
     const previousFrequency = this.lastFrequencyByRole.get(role);
-    const tableFrequency = patch.glide ? Math.max(targetFrequency, previousFrequency || 0) : targetFrequency;
-    const operatorTables = patch.waveforms?.map((shape, index) =>
-      waveformTable(shape, tableFrequency * patch.ratios[index] * 1.5));
+    const glideSeconds = tunedLead ? 0 : patch.glide || 0;
+    const tableFrequency = glideSeconds ? Math.max(targetFrequency, previousFrequency || 0) : targetFrequency;
+    const operatorTables = tablesForPatch(patch, tableFrequency);
     const drumWaveform = drumOverrides?.waveform ?? drum?.defaults.waveform;
-    const drumBodyTable = drumWaveform ? waveformTable(drumWaveform, note === 36
+    const drumBodyTable = drumWaveform ? waveformTable(drumWaveform, drum.defaults.kind === "tom"
+      ? (drumOverrides?.fundamental ?? drum.defaults.fundamental) + (drumOverrides?.sweep ?? drum.defaults.sweep)
+      : note === 36
       ? (drumOverrides?.fundamental ?? patch.kick?.[0] ?? drum.defaults.fundamental)
         + (drumOverrides?.sweep ?? patch.kick?.[1] ?? drum.defaults.sweep)
       : (drumOverrides?.fundamental ?? patch.snare?.[0] ?? drum.defaults.fundamental) + 320) : undefined;
     const beatSeconds = clamp(Number(message.beatSeconds) || .5, .2, 1.5);
     const startedLate = Number.isFinite(message.time)
-      ? Math.max(0, onsetFrame / sampleRate - message.time) : 0;
+      ? Math.max(0, onsetFrame / SAMPLE_RATE - message.time) : 0;
     // Follow the sequencer's beat across retriggers, slides, and seeks.
     const beatAtStart = Number.isFinite(message.onsetBeat)
       ? message.onsetBeat + startedLate / beatSeconds
-      : onsetFrame / sampleRate / beatSeconds;
-    const percussionEnvelope = message.genre ? production.amp : FACTORY_PATCHES[role].amp;
+      : onsetFrame / SAMPLE_RATE / beatSeconds;
+    const percussionEnvelope = role === "percussion_texture" && message.genre
+      ? productionPatch(message.genre, role, message.production).amp : FACTORY_PATCHES[role].amp;
+    const fixedPan = message.fixedPan === true;
+    const initialPan = clamp(Number(message.pan) || 0, -1, 1);
+    const panWidth = !fixedPan && (role === "bass" || (role === "drums" && note === 36)) ? .18 : 1;
     const voice = {
       role,
       patch,
+      // Keep the oscillator routing stable until this note has finished.
+      reducedQuality: this.voices.length + this.presences.size >= FULL_QUALITY_VOICES,
+      presetGain: (drum ? take?.drumGains?.[drumNote] : take?.instrumentGains?.[role]) ?? 1,
       operatorTables,
       drumBodyTable,
       drumSettings: drum?.defaults,
@@ -746,15 +890,22 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         && (overrides["cutoff.1"] !== undefined || overrides.resonance !== undefined || overrides.drive !== undefined)),
       beatSeconds,
       beatAtStart,
+      reverseTake: message.reverseTake,
+      turnaroundBass: role === "bass" && message.turnaroundBass === true,
+      accompaniment: message.accompaniment === true,
+      tunedLead,
+      legatoToBeat: message.legatoToBeat,
+      chordDegree: CHORD_VOICES.has(role) ? message.chordDegree : undefined,
       note,
-      frequency: patch.glide && previousFrequency ? previousFrequency : targetFrequency,
+      frequency: glideSeconds && previousFrequency ? previousFrequency : targetFrequency,
       targetFrequency,
-      glideSeconds: patch.glide || 0,
+      glideSeconds,
       velocity,
       targetVelocity: velocity,
       duration,
       regionId,
-      pan: clamp(Number(message.pan) || 0, -1, 1) * (role === "bass" || (role === "drums" && note === 36) ? .18 : 1),
+      pan: initialPan * panWidth,
+      fixedPan,
       brightness,
       saturation: clamp(Number(controls.harmonicIntensity ?? visual.saturation) || 0, 0, 1),
       texture: clamp(Number(controls.harmonicIntensity ?? visual.texture) || 0, 0, 1),
@@ -762,8 +913,8 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       speed: clamp(Number(controls.movement ?? message.speed) || 0, 0, 1),
       harmonicIntensity,
       expressionPan: clamp(Number(controls.pan ?? .5), 0, 1),
-      initialPan: clamp(Number(message.pan) || 0, -1, 1),
-      panWidth: role === "bass" || (role === "drums" && note === 36) ? .18 : 1,
+      initialPan,
+      panWidth,
       accentAt: message.accent ? 0 : -Infinity,
       acidPhase: 0,
       metalPhase: 0,
@@ -794,7 +945,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       combDamp: 0,
       crushCounter: 0,
       crushValue: 0,
-      gemsBank: blendGemsBank(message.gemsWeights, role),
+      gemsBank: message.gemsWeights === "artwork" ? ARTWORK_BANKS[role] : blendGemsBank(message.gemsWeights, role),
       seed: ((note + 1) * 1103515245 + onsetFrame) >>> 0,
     };
     const bank = voice.gemsBank;
@@ -804,11 +955,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       patch.amp[2],
       clamp(patch.amp[3] * (.5 + voice.releaseControl * 1.75) * bank.release, .025, 2.5),
     ];
-    voice.endTime = Math.max(voice.ampSettings[0] + voice.ampSettings[1], duration) + voice.ampSettings[3];
+    voice.endTime = duration + voice.ampSettings[3];
     const angle = (voice.pan + 1) * Math.PI / 4;
     voice.panLeft = fastCos(angle);
     voice.panRight = fastSin(angle);
     voice.isDrum = role === "drums" || role === "percussion_texture" || voice.kind === "boundary";
+    voice.stereoSaw = !voice.isDrum && role !== "bass" && Boolean(patch.sawWidth);
+    if (!voice.isDrum && role !== "bass") updatePitchedControls(voice);
     voice.isKick = role === "drums" && note === 36 && voice.kind !== "boundary";
     this.lastFrequencyByRole.set(role, targetFrequency);
     voice.release = patch.amp[3];
@@ -816,7 +969,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     if (voice.kind === "boundary") voice.release = .035;
     if (this.voices.length >= MAX_VOICES) {
       let index = this.voices.findIndex((candidate) => {
-        const age = (this.frame - candidate.startFrame) / sampleRate;
+        const age = (this.frame - candidate.startFrame) / SAMPLE_RATE;
         return age > candidate.duration;
       });
       if (index < 0) index = 0;
@@ -836,40 +989,47 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
   }
 
   operatorPhases(voice, patch, vibrato, pitchScale = 1) {
-    const bank = voice.gemsBank || blendGemsBank(null, voice.role);
-    const detune = (voice.texture * .0007 + voice.chorus * .0018) * bank.detune * bank.stereo;
-    for (let index = 0; index < 4; index++) {
-      const alternating = index % 2 ? detune : -detune;
+    const bank = voice.gemsBank;
+    const detune = voice.pitchedControls?.operatorDetune ??
+      (voice.texture * .0007 + voice.chorus * .0018) * bank.detune * bank.stereo;
+    const phaseStep = TAU * voice.frequency * pitchScale / SAMPLE_RATE;
+    // Two-operator patches never read the unused phases during this note.
+    const operators = !voice.reducedQuality ? 4 : patch.algorithm === "parallel" || patch.algorithm === "carriers" ? 3 : 2;
+    for (let index = 0; index < operators; index++) {
+      if (voice.reducedQuality && patch.algorithm === "carriers" && index === 1) continue;
+      const alternating = index === 0 && voice.tunedLead ? 0 : index % 2 ? detune : -detune;
       // Keep the operator ratios close to whole-number relationships so the
       // perceived fundamental survives visual modulation. Hue still colours
       // the spectrum, but no longer pushes upper operators far enough away
       // from their harmonic ratios to create a noise-like cluster.
       const hueWarp = index === 0 ? 1 : 1 + (voice.hue - .5) * .0025 * index;
       const phase = voice.phases[index]
-        + TAU * voice.frequency * pitchScale * patch.ratios[index] * hueWarp * (1 + alternating + vibrato) / sampleRate;
+        + phaseStep * patch.ratios[index] * hueWarp * (1 + alternating + vibrato);
       voice.phases[index] = phase < TAU ? phase : phase % TAU;
     }
+    if (voice.kind === "presence" || (voice.reducedQuality && patch.analogMix > .1) || !patch.unison) return;
     const unisonAmount = clamp((patch.unison || 0) * bank.unison, 0, .6);
     const unisonCents = 3 + unisonAmount * 16;
     const unisonRatio = unisonCents * CENT_RATIO;
     const leftPhase = voice.unisonPhases[0]
-      + TAU * voice.frequency * pitchScale * (1 - unisonRatio + vibrato) / sampleRate;
+      + phaseStep * (1 - unisonRatio + vibrato);
     const rightPhase = voice.unisonPhases[1]
-      + TAU * voice.frequency * pitchScale * (1 + unisonRatio + vibrato) / sampleRate;
+      + phaseStep * (1 + unisonRatio + vibrato);
     voice.unisonPhases[0] = leftPhase < TAU ? leftPhase : leftPhase % TAU;
     voice.unisonPhases[1] = rightPhase < TAU ? rightPhase : rightPhase % TAU;
   }
 
-  analogSample(voice, patch, bank, pitchScale, vibrato, isPresence) {
+  analogSample(voice, patch, bank, pitchScale, vibrato, isPresence, timbreLfo) {
     const baseMix = clamp((patch.analogMix || 0) * bank.saw, 0, 1.2);
     if (baseMix <= .0001) return 0;
-    const detuneCents = (patch.analogDetune || 0) * bank.stereo
+    const detuneCents = voice.pitchedControls?.analogDetune ?? (patch.analogDetune || 0) * bank.stereo
       * (.62 + voice.chorus * .56 + voice.texture * .18);
     const pulseMix = clamp((patch.pulseMix || 0) * bank.pulse, 0, .82);
-    const pulseWidth = clamp(.5 + (voice.hue - .5) * .28, .2, .8);
-    const activeIndices = isPresence || this.renderVoiceCount > 12
+    const pulseWidth = clamp(.5 + (voice.hue - .5) * .28 + (patch.pulseWidthMotion || 0) * timbreLfo, .2, .8);
+    const activeIndices = isPresence || voice.reducedQuality
       ? ANALOG_TRIO
       : ANALOG_ALL;
+    const baseIncrement = voice.frequency * pitchScale * (1 + vibrato) / SAMPLE_RATE;
     let sample = 0;
     let side = 0;
     for (let slot = 0; slot < activeIndices.length; slot++) {
@@ -878,12 +1038,17 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       // conversion is perceptually equivalent and far cheaper than five
       // exponentials for every rendered sample.
       const ratio = 1 + ANALOG_OFFSETS[index] * detuneCents * CENT_RATIO;
-      const increment = clamp(voice.frequency * pitchScale * ratio * (1 + vibrato) / sampleRate, .000001, .45);
+      const increment = clamp(baseIncrement * ratio, .000001, .45);
       const nextPhase = voice.analogPhases[index] + increment;
       const phase = nextPhase < 1 ? nextPhase : nextPhase - 1;
       voice.analogPhases[index] = phase;
-      const saw = bandLimitedSaw(phase, increment);
-      const pulse = pulseMix > .001 ? bandLimitedPulse(phase, increment, pulseWidth) : 0;
+      const correction = polyBlep(phase, increment);
+      const saw = phase * 2 - 1 - correction;
+      let pulse = 0;
+      if (pulseMix > .001) {
+        const edge = phase - pulseWidth;
+        pulse = (edge < 0 ? 1 : -1) + correction - polyBlep(edge < 0 ? edge + 1 : edge, increment);
+      }
       const weight = activeIndices === ANALOG_TRIO
         ? (slot === 1 ? .44 : .28)
         : ANALOG_WEIGHTS[index];
@@ -896,7 +1061,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
   }
 
   formantSample(voice, input, frequency, resonance) {
-    const normalized = clamp(frequency / sampleRate, .002, .3);
+    const normalized = clamp(frequency / SAMPLE_RATE, .002, .3);
     // Two internal half-steps keep the Chamberlin state-variable filter stable
     // at bright formant frequencies and high resonance.
     const coefficient = clamp(Math.PI * normalized, .002, .94);
@@ -912,7 +1077,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
   combSample(voice, input, frequency, mix, feedback) {
     if (!voice.combBuffer || mix <= .0001) return input;
     const buffer = voice.combBuffer;
-    const delaySamples = clamp(Math.round(sampleRate / clamp(frequency, 55, 6000)), 2, buffer.length - 2);
+    const delaySamples = clamp(Math.round(SAMPLE_RATE / clamp(frequency, 55, 6000)), 2, buffer.length - 2);
     const offset = voice.combIndex - delaySamples;
     const readIndex = offset < 0 ? offset + buffer.length : offset;
     const delayed = buffer[readIndex];
@@ -950,9 +1115,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
   }
 
   filterSample(voice, input, cutoff, resonance, mode) {
-    const normalized = clamp(cutoff / sampleRate, .001, .42);
-    const frequency = clamp(Math.PI * normalized, .002, .94);
+    const normalized = clamp(cutoff / SAMPLE_RATE, .001, .42);
     const damping = 1.9 - clamp(resonance, 0, 1) * 1.45;
+    let frequency = clamp(Math.PI * normalized, .002, .94);
+    // High damping with a large step can destabilize this state-variable filter.
+    if (frequency * (frequency + 2 * damping) > 3.8) {
+      frequency = Math.sqrt(damping * damping + 3.8) - damping;
+    }
     let high = 0;
     for (let step = 0; step < 2; step++) {
       high = input - voice.filterLow - damping * voice.filterBand;
@@ -968,7 +1137,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const patch = voice.patch || PATCHES.bass;
     const bank = voice.gemsBank;
     voice.velocity += (voice.targetVelocity - voice.velocity) * .006;
-    const increment = clamp(voice.frequency / sampleRate, .000001, .45);
+    const increment = clamp(voice.frequency / SAMPLE_RATE, .000001, .45);
     voice.acidPhase += increment;
     if (voice.acidPhase >= 1) voice.acidPhase -= 1;
     const shape = patch.acidWaveform || "sawtooth";
@@ -985,7 +1154,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       const gate = Math.pow(.5+.5*fastCos(phase),1.9);
       const sidebands = fastSin(basePhase * 3 + (1.9 + 4.3*voice.harmonicIntensity)*fastSin(metalPhase))
         + .42 * fastSin(basePhase * 5) * fastSin(metalPhase * 2);
-      const bite = Math.tanh((sidebands*.71+saw*.22) * 3.6);
+      const bite = saturate((sidebands*.71+saw*.22) * 3.6);
       const color = this.filterSample(voice,bite,400+gate*(1500+voice.brightness*1900),
         .52+voice.harmonicIntensity*.35,"bandpass");
       return (.57 * sub + (.08+.82*gate)*color*1.9) * amp * patch.level * bank.level * voice.velocity;
@@ -1002,7 +1171,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     }
     const envelope = fastExpNeg(time * (14 - 7 * voice.harmonicIntensity));
     const accent = fastExpNeg((time - voice.accentAt) * 17);
-    const clock = voice.startFrame / sampleRate + time;
+    const clock = voice.startFrame / SAMPLE_RATE + time;
     const sweep = .5 + .5 * fastSin(TAU * (patch.bassSweep ?? .17) * clock);
     const wobble = patch.wobble
       ? 1 - patch.wobble * (.5 + .5 * fastCos(TAU * (patch.wobbleRate || 2) * clock / voice.beatSeconds))
@@ -1014,14 +1183,14 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     );
     const previousCutoff = voice.acidCutoff || cutoff;
     voice.acidCutoff = previousCutoff + (cutoff - previousCutoff) * .008;
-    const frequency = clamp(Math.PI * voice.acidCutoff / sampleRate, .002, .7);
+    const frequency = clamp(Math.PI * voice.acidCutoff / SAMPLE_RATE, .002, .7);
     const damping = 1 - patch.resonance * (.78 + voice.harmonicIntensity * .19);
     for (let step = 0; step < 2; step++) {
       const high = sample - voice.filterLow - damping * voice.filterBand;
       voice.filterBand += frequency * high;
       voice.filterLow += frequency * voice.filterBand;
     }
-    const driven = Math.tanh((voice.filterLow * .82 + voice.filterBand * .22) * patch.drive * bank.drive);
+    const driven = saturate((voice.filterLow * .82 + voice.filterBand * .22) * patch.drive * bank.drive);
     const body = (patch.octaveBody || 0) * fastSin(TAU * voice.acidPhase * 2);
     const output = patch.cleanSub ? driven * .70 + sub * patch.cleanSub * .56 + body : driven;
     return output * amp * patch.level * bank.level * voice.velocity;
@@ -1030,11 +1199,18 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
   pitchedSample(voice, time) {
     const patch = voice.patch || PATCHES[voice.role] || PATCHES.lead_synth;
     const bank = voice.gemsBank || blendGemsBank(null, voice.role);
-    if (voice.glideSeconds && voice.targetFrequency) {
+    if (voice.leadGlide) {
+      const phase = Math.min(1, (time - voice.leadGlide.start) / LEAD_GLIDE_SECONDS);
+      const eased = phase * phase * (3 - 2 * phase);
+      voice.frequency = phase === 1 ? voice.targetFrequency
+        : voice.leadGlide.from + (voice.targetFrequency - voice.leadGlide.from) * eased;
+      if (phase === 1) voice.leadGlide = null;
+    } else if (voice.glideSeconds && voice.targetFrequency) {
       const glideTime = Math.max(.004, voice.glideSeconds * bank.portamento);
-      const glideSmoothing = Math.min(1, 1 / (sampleRate * glideTime));
+      const glideSmoothing = Math.min(1, 1 / (SAMPLE_RATE * glideTime));
       voice.frequency += (voice.targetFrequency - voice.frequency) * glideSmoothing;
     }
+    if (voice.role === "lead_synth") voice.velocity += (voice.targetVelocity - voice.velocity) * .006;
     const isPresence = voice.kind === "presence";
     const stereoSaw = !isPresence && patch.sawWidth;
     const ampSettings = isPresence
@@ -1053,16 +1229,17 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       return 0;
     }
     if (voice.role === "bass") return this.acidSample(voice, time, amp) * bassVolumeGain(voice, time);
-    const vibratoDepth = (patch.vibrato[0] + voice.chorus * .08 + voice.speed * .025)
+    const controls = voice.pitchedControls;
+    const vibratoDepth = controls?.vibratoDepth ?? (patch.vibrato[0] + voice.chorus * .08 + voice.speed * .025)
       * bank.vibrato * bank.lfo1Depth;
     const vibrato = vibratoDepth
       ? fastSin(TAU * patch.vibrato[1] * bank.lfo1Rate * time) * vibratoDepth / 12
       : 0;
     const timbreLfo = fastSin(TAU * patch.motion[0] * bank.lfo2Rate * time)
       * patch.motion[1] * bank.lfo2Depth;
-    const pitchEnvelope = patch.pitchEnvelope || NO_PITCH_ENVELOPE;
-    const pitchSemitones = pitchEnvelope[0] * bank.pitchEnv
-      * fastExpNeg(time / Math.max(.006, pitchEnvelope[1]));
+    const pitchEnvelope = voice.tunedLead ? NO_PITCH_ENVELOPE : patch.pitchEnvelope || NO_PITCH_ENVELOPE;
+    const pitchSemitones = pitchEnvelope[0] ? pitchEnvelope[0] * bank.pitchEnv
+      * fastExpNeg(time / Math.max(.006, pitchEnvelope[1])) : 0;
     const pitchRatio = pitchSemitones * Math.LN2 / 12;
     const pitchScale = Math.abs(pitchSemitones) > .001
       ? 1 + pitchRatio + pitchRatio * pitchRatio * .5
@@ -1071,16 +1248,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     // Visual features shape timbre inside a restrained range. Event voices
     // retain enough FM movement to identify each instrument, while the quiet
     // presence layer stays almost carrier-like and cannot mask melody/chords.
-    const colourIndexBase = isPresence
-      ? .18 + voice.brightness * .16 + voice.saturation * .08
-      : .46 + voice.brightness * .38 + voice.saturation * .16
-        + voice.speed * .28 + voice.harmonicIntensity * .34;
+    const colourIndexBase = controls?.colourIndex ?? .18 + voice.brightness * .16 + voice.saturation * .08;
     const colourIndex = colourIndexBase * clamp(1 + timbreLfo, .55, 1.55);
     const modSustain = patch.modSustain ?? (voice.role === "pad" || voice.role === "strings" ? .42 : .04);
     const modAttack = (patch.modAttack ?? .004) * bank.modAttack;
-    const reducedQuality = this.renderVoiceCount > 12;
+    const reducedQuality = voice.reducedQuality;
     // The reduced algorithms skip operators 3 and 4. Avoid evaluating their
-    // envelopes as well, keeping the phase updates for transitions in quality.
+    // envelopes as well.
     const index1 = patch.algorithm === "carriers" ? 0 : patch.indices[1] * colourIndex * bank.index
       * modulationEnvelope(time, patch.modDecay[1] * bank.modDecay, modSustain, modAttack);
     const index2 = reducedQuality || patch.algorithm === "parallel" || patch.algorithm === "carriers"
@@ -1132,7 +1306,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         voice.feedbackSample = o4;
       }
     }
-    const analog = this.analogSample(voice, patch, bank, pitchScale, vibrato, isPresence);
+    const analog = this.analogSample(voice, patch, bank, pitchScale, vibrato, isPresence, timbreLfo);
     if (!stereoSaw) sample += analog;
     if (patch.noise && !isPresence) sample += this.random(voice) * patch.noise * bank.noise * (.24 + voice.texture * .55);
     if (!isPresence && patch.transient) {
@@ -1143,7 +1317,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     // the visual data increases modulation depth.
     const fundamental = fastSin(p[0]);
     const unisonAmount = clamp((patch.unison || 0) * bank.unison, 0, .6);
-    const unison = reducedQuality && patch.analogMix > .1
+    const unison = isPresence || (reducedQuality && patch.analogMix > .1) || !unisonAmount
       ? 0
       : (fastSin(voice.unisonPhases[0]) + fastSin(voice.unisonPhases[1])) * .5;
     sample = isPresence
@@ -1157,12 +1331,9 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       clamp((patch.comb || 0) * bank.comb * (isPresence ? .28 : 1), 0, .86),
       clamp((patch.combFeedback ?? .55) * (.72 + bank.comb * .18), 0, .88),
     );
-    const cutoff = clamp(
-      (patch.cutoff[0] + (patch.cutoff[1] - patch.cutoff[0]) * voice.brightness ** 1.45)
-        * bank.cutoff * clamp(1 + timbreLfo * .32, .62, 1.4),
-      80,
-      16000,
-    );
+    const cutoffBase = controls?.cutoff ??
+      (patch.cutoff[0] + (patch.cutoff[1] - patch.cutoff[0]) * voice.brightness ** 1.45) * bank.cutoff;
+    const cutoff = clamp(cutoffBase * clamp(1 + timbreLfo * .32, .62, 1.4), 80, 16000);
     let filtered = this.filterSample(
       voice,
       sample,
@@ -1181,12 +1352,11 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       filtered = filtered * (1 - formantMix) + formant * formantMix * 1.5;
     }
     filtered = this.digitalShape(voice, filtered, patch, bank, isPresence);
-    const driven = Math.tanh(
-      filtered * patch.drive * bank.drive * (1 + voice.saturation * .45 + voice.harmonicIntensity * .35),
-    );
+    const drive = controls?.drive ?? patch.drive * bank.drive * (1 + voice.saturation * .45 + voice.harmonicIntensity * .35);
+    const driven = saturate(filtered * drive);
     const level = amp * patch.level * bank.level * voice.velocity;
     if (stereoSaw) {
-      voice.sawSideLow += (voice.sawSide - voice.sawSideLow) * clamp(4 * cutoff / sampleRate, .01, .84);
+      voice.sawSideLow += (voice.sawSide - voice.sawSideLow) * clamp(4 * cutoff / SAMPLE_RATE, .01, .84);
       const side = voice.sawSideLow * patch.sawWidth * patch.sawBlend * 1.8;
       voice.sideSample = side / (1 + Math.abs(side)) * level;
     }
@@ -1214,13 +1384,19 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       const level = edits?.level ?? patch.kickLevel ?? settings.level;
       const env = fastExpNeg(time * decay);
       const frequency = base + drop * fastExpNeg(time * sweepRate);
-      voice.phases[0] += TAU * frequency / sampleRate;
-      const click = (fastSin(TAU * 1490 * time) * .18 + this.random(voice) * .10) * fastExpNeg(time * 155);
+      voice.phases[0] += TAU * frequency / SAMPLE_RATE;
+      // Give the beater a short band of noise, without a fixed-frequency ring.
+      const noise = this.random(voice);
+      const low = voice.kickClickLow ?? 0;
+      const band = voice.kickClickBand ?? 0;
+      voice.kickClickLow = low + (noise - low) * KICK_CLICK_HIGHPASS;
+      voice.kickClickBand = band + (noise - voice.kickClickLow - band) * KICK_CLICK_LOWPASS;
+      const click = voice.kickClickBand * .48 * fastExpNeg(time * 155);
       const body = oscillatorSample(voice.phases[0], voice.drumBodyTable) * env;
       voice.finished = time > .48;
       const sample = (body + click * clickLevel) * velocity * level;
       if (voice.drumFilter) return this.shapeDrum(voice, sample, time, voice.finished);
-      return Math.tanh(sample * voice.gemsBank.drive) * voice.gemsBank.level;
+      return saturate(sample * voice.gemsBank.drive) * voice.gemsBank.level;
     }
     if (note === 38) {
       if (patch.snare) {
@@ -1275,9 +1451,20 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         time > (note === 46 ? .75 : .24),
       );
     }
+    if (settings?.kind === "tom") {
+      const frequency = (edits?.fundamental ?? settings.fundamental)
+        + (edits?.sweep ?? settings.sweep) * fastExpNeg(time * 49);
+      const decay = edits?.decay ?? settings.decay;
+      voice.phases[0] += TAU * frequency / SAMPLE_RATE;
+      const body = oscillatorSample(voice.phases[0], voice.drumBodyTable) * fastExpNeg(time * decay);
+      const head = fastSin(voice.phases[0] * 1.63) * .15 * fastExpNeg(time * (decay + 20));
+      const stick = this.random(voice) * (edits?.noise ?? settings.noise) * fastExpNeg(time * 112);
+      const level = (edits?.level ?? settings.level) * velocity;
+      return this.shapeDrum(voice, (body + head + stick) * level, time, time > .32);
+    }
     const env = fastExpNeg(time * 12);
     const frequency = 95 + (note - 37) * 18 + 65 * fastExpNeg(time * 25);
-    voice.phases[0] += TAU * frequency / sampleRate;
+    voice.phases[0] += TAU * frequency / SAMPLE_RATE;
     return this.shapeDrum(
       voice,
       fastSin(voice.phases[0] + fastSin(voice.phases[0] * 1.47) * 1.2) * env * .2 * velocity,
@@ -1303,14 +1490,71 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     } else {
       // A falling sine with a short noise attack behaves like a struck skin.
       const frequency = (note === 45 ? 178 : 130) + 52 * fastExpNeg(time * 42);
-      voice.phases[0] += TAU * frequency / sampleRate;
+      voice.phases[0] += TAU * frequency / SAMPLE_RATE;
       sample = fastSin(voice.phases[0]) * fastExpNeg(time * 22) * .82 + noise * fastExpNeg(time * 92) * .33;
       tail = .22;
     }
     const cutoff = patch.cutoff[0] + (patch.cutoff[1] - patch.cutoff[0]) * voice.brightness;
-    const filtered = this.filterSample(voice, sample, cutoff, patch.resonance, patch.filterMode);
+    const filtered = this.filterSample(voice, this.circuitSample(voice, sample, time, patch),
+      cutoff, patch.resonance, patch.filterMode);
     voice.finished = time >= tail;
-    return Math.tanh(filtered * patch.drive) * velocity * patch.level * voice.gemsBank.level;
+    return saturate(filtered * patch.drive) * velocity * patch.level * voice.gemsBank.level;
+  }
+
+  circuitSample(voice, sample, time, parameters) {
+    const mix = parameters?.circuitMix;
+    if (!(mix > 0)) return sample;
+    const rate = parameters.circuitRate ?? 24;
+    let shaped;
+    switch (parameters.circuit) {
+      case "clip": {
+        const input = sample * 8;
+        shaped = input / (1 + Math.abs(input)) * .45;
+        break;
+      }
+      case "steps": {
+        const tick = Math.floor(time * rate);
+        if (tick !== voice.circuitTick) {
+          voice.circuitTick = tick;
+          voice.circuitHeld = Math.round(sample * 64) / 64;
+        }
+        shaped = voice.circuitHeld;
+        break;
+      }
+      case "gate":
+        shaped = sample * this.pulseGate(time * rate + .06);
+        break;
+      case "ring":
+        shaped = sample * fastSin(TAU * time * rate);
+        break;
+      case "bloom": {
+        const rise = Math.min(1, time * rate);
+        shaped = sample * rise * rise;
+        break;
+      }
+      default:
+        return sample;
+    }
+    return sample + (shaped - sample) * mix;
+  }
+
+  pulseGate(cycle) {
+    const phase = cycle - Math.floor(cycle);
+    return Math.max(0, Math.min(1, phase * 20, (.55 - phase) * 20));
+  }
+
+  electronicGain(voice, time) {
+    const { gateDepth, gateRate, ringMix, ringRatio } = voice.patch;
+    let gain = 1;
+    if (gateDepth > 0) {
+      const beat = voice.beatAtStart + time / voice.beatSeconds;
+      gain -= gateDepth * (1 - this.pulseGate(beat * (gateRate ?? 2) + .06));
+    }
+    if (ringMix > 0) {
+      voice.ringPhase = ((voice.ringPhase ?? 0) + TAU * voice.frequency * (ringRatio ?? 1.5) / SAMPLE_RATE) % TAU;
+      gain *= 1 - ringMix + ringMix * fastSin(voice.ringPhase);
+    }
+    return gain;
   }
 
   shapeDrum(voice, sample, time, finished) {
@@ -1320,7 +1564,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       * fastExpNeg(time * 95) * .035;
     const filtered = this.filterSample(
       voice,
-      sample + transient,
+      this.circuitSample(voice, sample, time, voice.drumOverrides) + transient,
       clamp(patch.cutoff[1] * bank.cutoff, 600, 16000),
       clamp((patch.resonance ?? .25) * bank.resonance, 0, .9),
       patch.filterMode || "lowpass",
@@ -1328,7 +1572,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const shaped = this.digitalShape(voice, filtered, patch, bank, false);
     voice.finished = finished;
     const drive = voice.drumFilter ? patch.drive / PATCHES.drums.drive : 1;
-    return Math.tanh(shaped * bank.drive * drive) * bank.level;
+    return saturate(shaped * bank.drive * drive) * bank.level;
   }
 
   process(_inputs, outputs) {
@@ -1336,10 +1580,10 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const left = output[0];
     const right = output[1] || output[0];
-    this.renderVoiceCount = this.voices.length + this.presences.size;
-    const separateSends = outputs.length === 4;
-    const mixSmoothing = 1 / (sampleRate * .028);
-    const expressionSmoothing = Math.min(1, left.length / (sampleRate * .042));
+    const separateSends = outputs.length >= 4;
+    const stemPorts = this.stemsEnabled ? this.stemPorts : null;
+    const mixSmoothing = 1 / (SAMPLE_RATE * .028);
+    const expressionSmoothing = Math.min(1, left.length / (SAMPLE_RATE * .042));
     for (const [id, mix] of this.regionMix) {
       mix.value += (mix.target - mix.value) * mixSmoothing * left.length;
       const target = separateSends && this.expression.get(id)?.sends;
@@ -1363,7 +1607,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       }
       const cutoff = mix.lowpass ??= { hz: mix.cutoffTarget };
       cutoff.hz += (mix.cutoffTarget - cutoff.hz) * expressionSmoothing;
-      const angle = TAU * clamp(cutoff.hz, 40, sampleRate * .45) / sampleRate;
+      const angle = TAU * clamp(cutoff.hz, 40, SAMPLE_RATE * .45) / SAMPLE_RATE;
       const cosine = Math.cos(angle);
       const alpha = Math.SQRT1_2 * Math.sin(angle);
       const inverse = 1 / (1 + alpha);
@@ -1372,24 +1616,32 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       cutoff.a2 = (1 - alpha) * inverse;
     }
     for (const voice of this.voices) {
-      voice.renderMix = this.regionLevel(voice.regionId);
-      voice.scanFilter = this.regionMix.get(voice.regionId)?.lowpass;
-      voice.sends = this.regionMix.get(voice.regionId)?.sends;
+      const mix = this.regionMix.get(voice.regionId);
+      voice.renderMix = mix?.value ?? 1;
+      voice.scanFilter = mix?.lowpass;
+      voice.sends = mix?.sends;
+      voice.stem = stemPorts && outputs[stemPorts.get(voice.role)];
       const controls = this.expression.get(voice.regionId);
       if (!controls || voice.isDrum) continue;
       const accent = voice.role === "bass" && voice.accentAt >= 0 ? .12 : 0;
-      voice.brightness += (clamp(controls.brightness + accent, 0, 1) - voice.brightness) * expressionSmoothing;
+      const brightness = clamp(controls.brightness + accent, 0, 1);
+      const timbreChanged = brightness !== voice.brightness || controls.harmonicIntensity !== voice.harmonicIntensity
+        || voice.saturation !== voice.harmonicIntensity || voice.texture !== voice.harmonicIntensity
+        || controls.movement !== voice.speed || controls.chorus !== voice.chorus;
+      voice.brightness += (brightness - voice.brightness) * expressionSmoothing;
       voice.harmonicIntensity += (controls.harmonicIntensity - voice.harmonicIntensity) * expressionSmoothing;
       voice.saturation = voice.texture = voice.harmonicIntensity;
       voice.speed += (controls.movement - voice.speed) * expressionSmoothing;
       voice.chorus += (controls.chorus - voice.chorus) * expressionSmoothing;
+      if (voice.pitchedControls && timbreChanged) updatePitchedControls(voice);
+      if (voice.fixedPan) continue;
       const pan = clamp(voice.initialPan + (controls.pan - voice.expressionPan) * 1.64, -.9, .9) * voice.panWidth;
       voice.pan += (pan - voice.pan) * expressionSmoothing;
       const angle = (voice.pan + 1) * Math.PI / 4;
       voice.panLeft = fastCos(angle);
       voice.panRight = fastSin(angle);
     }
-    const presenceSmoothing = 1 / (sampleRate * .045);
+    const presenceSmoothing = 1 / (SAMPLE_RATE * .045);
 
     for (let sampleIndex = 0; sampleIndex < left.length; sampleIndex++) {
       let leftSample = 0;
@@ -1397,12 +1649,14 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       const absoluteFrame = this.frame + sampleIndex;
       while (this.pendingNotes.length && this.pendingNotes[0].frame <= absoluteFrame) {
         const pending = this.pendingNotes.shift();
-        this.addVoice(pending.message, absoluteFrame);
-        const voice = this.voices.at(-1);
+        this.startScheduledMessage(pending.message, absoluteFrame);
+        const voice = pending.message.type === "note" ? this.voices.at(-1) : null;
         if (voice) {
-          voice.renderMix = this.regionLevel(voice.regionId);
-          voice.scanFilter = this.regionMix.get(voice.regionId)?.lowpass;
-          voice.sends = this.regionMix.get(voice.regionId)?.sends;
+          const mix = this.regionMix.get(voice.regionId);
+          voice.renderMix = mix?.value ?? 1;
+          voice.scanFilter = mix?.lowpass;
+          voice.sends = mix?.sends;
+          voice.stem = stemPorts && outputs[stemPorts.get(voice.role)];
         }
       }
       this.kickEnvelope *= this.kickDecay;
@@ -1413,7 +1667,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         if (voice.isKick && absoluteFrame === voice.startFrame) {
           this.kickEnvelope = Math.max(this.kickEnvelope, voice.velocity * voice.renderMix);
         }
-        const time = (absoluteFrame - voice.startFrame) / sampleRate;
+        const time = (absoluteFrame - voice.startFrame) / SAMPLE_RATE;
         let sample = voice.isDrum ? this.drumSample(voice, time) : this.pitchedSample(voice, time);
         if (voice.drumEnvelope && voice.kind !== "boundary") {
           sample *= envelope(time, voice.duration, voice.ampSettings);
@@ -1424,6 +1678,11 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
           continue;
         }
         let side = left === right ? 0 : voice.sideSample;
+        if (!voice.isDrum && (voice.patch.gateDepth > 0 || voice.patch.ringMix > 0)) {
+          const electronic = this.electronicGain(voice, time);
+          sample *= electronic;
+          side *= electronic;
+        }
         const filter = voice.scanFilter;
         if (filter) {
           const memory = voice.scanLowpass;
@@ -1431,17 +1690,21 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
           memory.main1 = 2 * filter.b0 * sample - filter.a1 * main + memory.main2;
           memory.main2 = filter.b0 * sample - filter.a2 * main;
           sample = main;
-          const stereo = filter.b0 * side + memory.side1;
-          memory.side1 = 2 * filter.b0 * side - filter.a1 * stereo + memory.side2;
-          memory.side2 = filter.b0 * side - filter.a2 * stereo;
-          side = stereo;
+          if (voice.stereoSaw) {
+            const stereo = filter.b0 * side + memory.side1;
+            memory.side1 = 2 * filter.b0 * side - filter.a1 * stereo + memory.side2;
+            memory.side2 = filter.b0 * side - filter.a2 * stereo;
+            side = stereo;
+          }
         }
-        const fade = voice.stopFrame == null ? 1 : Math.max(0, 1 - (absoluteFrame - voice.stopFrame) / (sampleRate * .035));
+        const fade = voice.stopFrame == null ? 1 : Math.max(0,
+          1 - (absoluteFrame - voice.stopFrame) / (SAMPLE_RATE * (voice.stopFadeSeconds ?? .035)));
         if (fade === 0) {
           this.voices.splice(index, 1);
           continue;
         }
-        let mix = voice.renderMix * (1 - this.kickDuck * voice.duckDepth) * fade;
+        let mix = voice.presetGain * voice.renderMix * (1 - this.kickDuck * voice.duckDepth) * fade;
+        if (voice.turnaroundBass) mix *= Math.min(1, time / SCAN_TURN_BASS_FADE_SECONDS);
         const tremolo = voice.sends?.tremolo;
         if (tremolo > 0) {
           const phase = (voice.beatAtStart + time / voice.beatSeconds) * 2;
@@ -1451,30 +1714,42 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         const r = (sample + side) * voice.panRight * mix;
         leftSample += l;
         rightSample += r;
-        if (separateSends && voice.sends) writeSends(outputs, sampleIndex, l, r, voice.sends);
+        const stem = voice.stem;
+        if (stem?.length === 2) {
+          stem[0][sampleIndex] += l;
+          stem[1][sampleIndex] += r;
+        }
+        if (separateSends && voice.sends) writeSends(outputs, sampleIndex, l, r, voice.sends, voice);
       }
-      for (const [id, voice] of this.presences) {
-        const smoothing = presenceSmoothing;
-        voice.gain += (voice.targetGain - voice.gain) * smoothing;
-        voice.frequency += (voice.targetFrequency - voice.frequency) * smoothing;
-        voice.velocity += (voice.targetVelocity - voice.velocity) * smoothing;
-        voice.pan += (voice.targetPan - voice.pan) * smoothing;
-        for (const parameter of BANK_PARAMETERS) {
-          voice.gemsBank[parameter] += (voice.targetGemsBank[parameter] - voice.gemsBank[parameter]) * smoothing;
+      if (this.presences.size) {
+        for (const [id, voice] of this.presences) {
+          const smoothing = presenceSmoothing;
+          voice.gain += (voice.targetGain - voice.gain) * smoothing;
+          voice.frequency += (voice.targetFrequency - voice.frequency) * smoothing;
+          voice.velocity += (voice.targetVelocity - voice.velocity) * smoothing;
+          voice.pan += (voice.targetPan - voice.pan) * smoothing;
+          for (const parameter of BANK_PARAMETERS) {
+            voice.gemsBank[parameter] += (voice.targetGemsBank[parameter] - voice.gemsBank[parameter]) * smoothing;
+          }
+          const sample = this.pitchedSample(voice, voice.ageFrames / SAMPLE_RATE);
+          voice.ageFrames++;
+          const angle = (voice.pan + 1) * Math.PI / 4;
+          const presenceSample = sample * voice.gain * .22;
+          const l = presenceSample * fastCos(angle);
+          const r = presenceSample * fastSin(angle);
+          leftSample += l;
+          rightSample += r;
+          const stem = stemPorts && outputs[stemPorts.get(voice.role)];
+          if (stem?.length === 2) {
+            stem[0][sampleIndex] += l;
+            stem[1][sampleIndex] += r;
+          }
+          if (separateSends) {
+            const sends = this.regionMix.get(voice.regionId)?.sends;
+            if (sends) writeSends(outputs, sampleIndex, l, r, sends, voice);
+          }
+          if (voice.targetGain === 0 && voice.gain < .0005) this.presences.delete(id);
         }
-        const sample = this.pitchedSample(voice, voice.ageFrames / sampleRate);
-        voice.ageFrames++;
-        const angle = (voice.pan + 1) * Math.PI / 4;
-        const presenceSample = sample * voice.gain * .22;
-        const l = presenceSample * fastCos(angle);
-        const r = presenceSample * fastSin(angle);
-        leftSample += l;
-        rightSample += r;
-        if (separateSends) {
-          const sends = this.regionMix.get(voice.regionId)?.sends;
-          if (sends) writeSends(outputs, sampleIndex, l, r, sends);
-        }
-        if (voice.targetGain === 0 && voice.gain < .0005) this.presences.delete(id);
       }
       left[sampleIndex] = clamp(leftSample, -1.2, 1.2);
       right[sampleIndex] = clamp(rightSample, -1.2, 1.2);

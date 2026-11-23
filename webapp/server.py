@@ -31,6 +31,7 @@ from region_proposals import (
     normalize_location, proposal_region_type, region_type_guide, set_region_type,
 )
 from arrangement_review import router as arrangement_review_router
+from output_bridge.audio_stream import router as multitrack_router
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,7 @@ app = FastAPI(title="Street Art Resonance Lab")
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 app.mount("/runtime", StaticFiles(directory=RUNTIME_DIR), name="runtime")
 app.include_router(arrangement_review_router)
+app.include_router(multitrack_router)
 
 jobs: dict[str, dict[str, Any]] = {}
 analysis_lock = asyncio.Lock()
@@ -1232,4 +1234,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("STREET_ART_PORT", "8765"))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="127.0.0.1", port=port, ws_per_message_deflate=False)

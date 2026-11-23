@@ -38,6 +38,8 @@ button:hover:enabled, .back:hover { box-shadow: inset 0 0 0 1px currentColor; }
 .topbar :focus-visible, .sidebar :focus-visible { outline-color: var(--accent); }
 .back { text-decoration: none; border-color: transparent; padding-left: 0; }
 .topbar button { color: var(--accent); }
+.bank-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .5rem .85rem; }
+.bank-actions a { color: inherit; text-underline-offset: .2em; }
 .workspace {
   display: grid;
   grid-template-columns: clamp(200px, 24vw, 295px) minmax(0, 1fr);
@@ -96,6 +98,7 @@ button:hover:enabled, .back:hover { box-shadow: inset 0 0 0 1px currentColor; }
   margin-bottom: 1.25rem;
 }
 .preset-bar label { font-size: .9rem; font-weight: 650; }
+#bank-status { color: var(--muted); margin: 0; font-size: .85rem; }
 .preset-bar select, .waveform-select select {
   background: #faf9f3;
   border: 1px solid #aaa99b;

@@ -1,8 +1,9 @@
 import {
   DRUM_VOICES, PROJECT_PRESET_NAMES, drumDefaultValue, fmDefaultValue, fmGroups, normalizeDrumPatch,
   normalizeFmPatch, rebasePreset,
-} from "./fm-patches.mjs?v=performance-mix1";
-import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=patch-editor3";
+} from "./fm-patches.mjs?v=electronic-patches1";
+import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=short-kick1";
+import { PRESET_BANK_STORAGE, bankPatchValues, readPresetBank } from "./fm-preset-bank.mjs?v=electronic-patches1";
 
 const instruments = {
   lead_synth: "Lead Synth",
@@ -30,6 +31,7 @@ const byId = id => document.getElementById(id);
 const ui = Object.fromEntries([
   "instruments", "patch-title", "patch-info", "reset", "export", "drum-pieces", "play", "play-kit",
   "compare-default", "compare-draft", "loop", "meter", "status", "knobs", "preset", "use-preset",
+  "import-bank", "bank-file", "bank-status",
 ].map(id => [id, byId(id)]));
 
 const instrumentButtons = {};
@@ -46,6 +48,18 @@ let previewGeneration = 0;
 let audioError = "";
 let storedLocally = true;
 const overrides = readDraft();
+let presetBank = localPresetBank();
+
+function localPresetBank() {
+  try {
+    const json = localStorage.getItem(PRESET_BANK_STORAGE);
+    return json ? readPresetBank(JSON.parse(json)) : null;
+  } catch (_) { return null; }
+}
+
+function updateBankStatus() {
+  ui["bank-status"].textContent = presetBank ? `${presetBank.presets.length} saved presets loaded` : "";
+}
 
 function readDraft() {
   let saved;
@@ -255,15 +269,19 @@ function makeChoice(control) {
 }
 
 function presetsForSelection() {
-  return role === "drums" ? drumPresets[drumNote] : instrumentPresets[role];
+  const builtIn = (role === "drums" ? drumPresets[drumNote] : instrumentPresets[role]) ?? [];
+  const saved = (presetBank?.presets ?? []).filter(preset => preset.role === role && (role !== "drums" || preset.note === drumNote));
+  return [...builtIn, ...saved.map(preset => ({ ...preset, fromBank: true }))];
 }
 
 function renderSelection() {
   const isDrum = role === "drums";
   activePreset = null;
+  const presets = presetsForSelection();
+  ui.preset.disabled = presets.length === 0;
   ui.preset.replaceChildren(
     new Option("Choose a preset", ""),
-    ...presetsForSelection().map((preset, index) => new Option(preset.name, String(index))),
+    ...presets.map((preset, index) => new Option(preset.fromBank ? "Bank · " + preset.name : preset.name, String(index))),
   );
   ui["patch-title"].textContent = isDrum ? DRUM_VOICES[drumNote].label : instruments[role];
   ui["patch-info"].textContent = isDrum ? "Drums · MIDI note " + drumNote : labels[role];
@@ -282,7 +300,7 @@ function renderSelection() {
     if (drumNote === 36 && isDrum && group.label === "Filter and drive") {
       const note = document.createElement("p");
       note.className = "panel-note";
-      note.textContent = "The kick bypasses this stage until one of these controls is changed.";
+      note.textContent = "Editing the filter or using an electronic circuit activates this stage.";
       section.append(note);
     }
     section.append(grid);
@@ -337,7 +355,8 @@ const phrases = {
 const kitPhrase = [
   [0, 36, .2, .9], [0, 42, .2, .68], [.5, 42, .2, .52], [1, 38, .2, .82],
   [1, 42, .2, .59], [1.5, 46, .2, .72], [2, 36, .2, .83], [2, 42, .2, .62],
-  [2.5, 42, .2, .55], [2.75, 36, .2, .7], [3, 39, .2, .8], [3, 42, .2, .64], [3.5, 46, .2, .76],
+  [2.5, 42, .2, .55], [2.75, 36, .2, .7], [3, 39, .2, .8],
+  [3.25, 50, .12, .66], [3.5, 47, .12, .72], [3.75, 43, .12, .81],
 ];
 
 async function getAudio() {
@@ -347,7 +366,7 @@ async function getAudio() {
     const resumed = context.resume();
     audioPromise = (async () => {
       try {
-        await Promise.all([resumed, context.audioWorklet.addModule("./fm-worklet.js?v=performance-mix1")]);
+        await Promise.all([resumed, context.audioWorklet.addModule("./fm-worklet.js?v=lead-tuning1")]);
         const voice = new AudioWorkletNode(context, "street-art-fm", {
           numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
         });
@@ -482,8 +501,8 @@ ui.preset.addEventListener("change", () => {
     compare(false);
     return;
   }
-  const { name, values } = presetsForSelection()[Number(ui.preset.value)];
-  activePreset = { name, values: libraryChanges(role, drumNote, values) };
+  const preset = presetsForSelection()[Number(ui.preset.value)];
+  activePreset = { name: preset.name, values: preset.fromBank ? bankPatchValues(preset) : libraryChanges(role, drumNote, preset.values) };
   compareDefault = false;
   refreshFields();
   const kind = playback?.kind || "selection";
@@ -522,4 +541,31 @@ ui.export.addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 window.addEventListener("pagehide", stopPreview);
+window.addEventListener("storage", event => {
+  if (event.key !== PRESET_BANK_STORAGE) return;
+  presetBank = localPresetBank();
+  compareDefault = false;
+  stopPreview();
+  renderSelection();
+  updateBankStatus();
+});
+ui["import-bank"].addEventListener("click", () => ui["bank-file"].click());
+ui["bank-file"].addEventListener("change", async () => {
+  const [file] = ui["bank-file"].files;
+  ui["bank-file"].value = "";
+  if (!file) return;
+  try {
+    presetBank = readPresetBank(JSON.parse(await file.text()));
+  } catch (error) {
+    ui["bank-status"].textContent = error.message;
+    return;
+  }
+  compareDefault = false;
+  stopPreview();
+  renderSelection();
+  updateBankStatus();
+  try { localStorage.setItem(PRESET_BANK_STORAGE, JSON.stringify(presetBank)); }
+  catch (_) { ui["bank-status"].textContent += " for this session"; }
+});
 renderSelection();
+updateBankStatus();

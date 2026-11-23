@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rhythm Library · Street Art Sonification</title>
+  <link rel="stylesheet" href="./rhythm-review.css">
+  <script type="module" src="./rhythm-review.mjs"></script>
+</head>
+<body>
+  <main class="review">
+    <header class="heading">
+      <div>
+        <p class="project-name">Street Art Sonification</p>
+        <h1>Rhythm Library</h1>
+        <p id="summary"></p>
+      </div>
+      <a class="project-link" href="/">Open project ↗</a>
+    </header>
+
+    <div class="library">
+      <nav aria-label="Instruments" id="instruments"></nav>
+      <section aria-labelledby="instrument-title" class="instrument">
+        <div class="section-head">
+          <div>
+            <h2 id="instrument-title">Instruments</h2>
+            <p id="patch"></p>
+          </div>
+          <div class="filters">
+            <label>Density
+              <select id="density">
+                <option value="all">All</option>
+                <option value="sparse">Sparse</option>
+                <option value="medium">Medium</option>
+                <option value="dense">Dense</option>
+              </select>
+            </label>
+            <label>Material
+              <select id="material">
+                <option value="all">All</option>
+                <option value="added">Latest additions</option>
+                <option value="previous">Existing material</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="playback" id="playback" hidden>
+          <div>
+            <strong id="playing-title"></strong>
+            <a id="download" download>Download audio ↓</a>
+          </div>
+          <audio id="audio" controls preload="none" aria-label="Rhythm playback"></audio>
+        </div>
+
+        <p class="guide" id="guide" hidden>The first bar is the pattern you chose. The next three bars show how the project uses it. The grid shows bar 1 note starts in sixteenth-note steps.</p>
+        <p id="status" role="status">Loading the rhythm library…</p>
+        <div id="patterns" class="patterns"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

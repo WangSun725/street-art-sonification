@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instrument Mix · Street Art Sonification</title>
+  <link rel="stylesheet" href="/static/mix-review.css">
+  <script type="module" src="/static/mix-review.mjs"></script>
+</head>
+<body>
+  <main class="studio">
+    <header class="page-header">
+      <div>
+        <p class="project">Street Art Sonification</p>
+        <h1>Instrument Mix</h1>
+      </div>
+      <a href="/" class="project-link">Open project <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <div class="workspace">
+      <section class="auditions" aria-labelledby="examplesHeading">
+        <h2 id="examplesHeading">Rendered scans</h2>
+        <div id="examples" class="examples" role="group" aria-labelledby="examplesHeading"></div>
+      </section>
+
+      <section class="mixer" aria-labelledby="mixHeading">
+        <div class="mixer-heading">
+          <div>
+            <h2 id="mixHeading">Instrument levels</h2>
+            <p>Compare the same mix across the scans.</p>
+          </div>
+          <div class="save-actions">
+            <button id="save" class="primary" type="button">Save mix</button>
+            <button id="revert" type="button">Revert</button>
+            <button id="download" type="button">Download mix</button>
+          </div>
+        </div>
+
+        <div class="transport" aria-label="Playback controls">
+          <button id="play" class="primary play" type="button" disabled>Play</button>
+          <button id="restart" type="button" disabled>Restart</button>
+          <input id="position" type="range" min="0" max="30" step=".1" value="0" aria-label="Playback position" disabled>
+          <output id="time" for="position">0:00 / 0:30</output>
+        </div>
+
+        <div id="channels" class="channels"></div>
+        <p id="status" class="status" role="status">Loading rendered scans…</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

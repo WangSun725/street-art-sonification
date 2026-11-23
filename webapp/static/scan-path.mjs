@@ -179,6 +179,41 @@ export function scanPoint(route, progress) {
   return { x: segment.from + (segment.to - segment.from) * phase, index: segment.index };
 }
 
+export function planScanAccompaniment(profile, route, durationBars, instruments, previous = [], lockedBeforeBar = 0) {
+  const endBar = route.at(-1)?.endBar ?? 0;
+  if (!profile || !instruments || !endBar) return [];
+  const { columns, min, max } = profile;
+  const blocks = [];
+  for (let startBar = 0; startBar < endBar; startBar += 4) {
+    const end = Math.min(startBar + 4, endBar);
+    const prior = blocks.at(-1);
+    const locked = previous[startBar / 4];
+    let count = prior?.count ?? 1;
+    if (locked && startBar < lockedBeforeBar) {
+      count = Math.min(instruments, locked.count);
+    } else if (!prior || end - startBar === 4) {
+      let edges = 0;
+      let pairs = 0;
+      const samples = (end - startBar) * 16;
+      for (let i = 0; i < samples; i++) {
+        const bar = startBar + (i + .5) / 16;
+        const { x } = scanPoint(route, bar / durationBars);
+        const columnIndex = Math.floor(x * columns.length + 1e-8);
+        const column = columns[Math.min(columns.length - 1, columnIndex)];
+        if (!column) continue;
+        edges += column.edges;
+        pairs += column.pairs;
+      }
+      if (pairs) {
+        const normalized = max - min >= .005 ? Math.max(0, (edges / pairs - min) / (max - min)) : 0;
+        count = Math.min(instruments, 1 + Math.floor(instruments * normalized));
+      }
+    }
+    blocks.push({ startBar, endBar: end, count });
+  }
+  return blocks;
+}
+
 export function scanProgressAtX(route, x, currentProgress) {
   let nearest = null;
   for (const segment of route) {

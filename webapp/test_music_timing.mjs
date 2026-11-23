@@ -1,7 +1,37 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { buildScanRoute, insertScanRange, planRegionScan, quantizePassages, scanPoint, scanProximity } from "./static/scan-path.mjs";
+import { buildScanRoute, insertScanRange, planRegionScan, planScanAccompaniment, quantizePassages, scanPoint, scanProximity } from "./static/scan-path.mjs";
+import { scanEdgeProfile } from "./static/artwork-composition.mjs";
+
+const tinyArtwork = Uint8ClampedArray.from([50, 52, 140, 55, 90, 50, 110, 108, 200]
+  .flatMap((gray, index) => [gray, gray, gray, index % 3 === 2 ? 0 : 255]));
+assert.deepEqual(scanEdgeProfile({ data: tinyArtwork, width: 3, height: 3 }), {
+  columns: [{ edges: 3, pairs: 7 }, { edges: 3, pairs: 7 }, null], min: 3 / 7, max: 3 / 7,
+});
+const edgeProfile = { min: 0, max: .4, columns: Array.from({ length: 40 }, (_, index) => ({
+  edges: index < 16 ? 0 : 40, pairs: 100,
+})) };
+const forwardPlan = planScanAccompaniment(edgeProfile, buildScanRoute("forward", [], [0, 1], 10), 10, 5);
+assert.deepEqual(forwardPlan, [
+  { startBar: 0, endBar: 4, count: 1 },
+  { startBar: 4, endBar: 8, count: 5 },
+  { startBar: 8, endBar: 10, count: 5 },
+]);
+const reversePath = buildScanRoute("reverse", [], [0, 1], 10);
+assert.deepEqual(planScanAccompaniment(edgeProfile, reversePath, 10, 5).map(block => block.count), [5, 3, 3]);
+assert.deepEqual(planScanAccompaniment(edgeProfile, reversePath, 10, 5, forwardPlan, 2).map(block => block.count), [1, 3, 3]);
+assert.deepEqual(planScanAccompaniment(edgeProfile, reversePath, 10, 0), []);
+assert.deepEqual(planScanAccompaniment({ min: .15, max: .154, columns: edgeProfile.columns }, reversePath, 10, 5)
+  .map(block => block.count), [1, 1, 1]);
+assert.equal(planScanAccompaniment(edgeProfile, buildScanRoute("forward", [], [0, 1], 2), 2, 5).length, 1);
+const pixelBoundaryProfile = { min: 0, max: 1, columns: Array.from({ length: 640 }, (_, index) => ({
+  edges: index % 2, pairs: 1,
+})) };
+const sameSpanPlan = direction => planScanAccompaniment(
+  pixelBoundaryProfile, buildScanRoute(direction, [], [0, .2], 4), 4, 5,
+);
+assert.deepEqual(sameSpanPlan("forward"), sameSpanPlan("reverse"));
 
 const roundTrip = buildScanRoute("roundtrip", [], [0, 1], 15);
 assert.deepEqual(roundTrip.map(({ startBar, endBar }) => [startBar, endBar]), [[0, 8], [8, 15]]);

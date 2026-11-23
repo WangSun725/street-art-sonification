@@ -1,6 +1,7 @@
-import pool from "./midi-candidate-pool.mjs?v=groove-v2";
-import { addedClips } from "./phrase-expansion.mjs?v=rwc-lead1";
-import { rwcLeadPhrases, rwcReverseLeadPhrases } from "./rwc-lead-pool.mjs?v=directional1";
+import pool from "./midi-candidate-pool.mjs?v=drum-fill1";
+import { addedClips } from "./phrase-expansion.mjs?v=drum-fill1";
+import { expandedRhythmClips } from "./rhythm-pool-expansion.mjs?v=same-band2";
+import { rwcLeadPhrases } from "./rwc-lead-pool.mjs?v=same-band2";
 import { rankLeadPhrases } from "./lead-chord-fit.mjs?v=rwc-lead1";
 
 const palette = [
@@ -134,6 +135,47 @@ export function detailDensity(mask, width, height, pixels) {
   return total ? edges/total : 0;
 }
 
+export function scanEdgeProfile({ data, width, height }) {
+  const grayscale = new Float64Array(width * height);
+  for (let pixel = 0; pixel < grayscale.length; pixel++) {
+    const i = pixel * 4;
+    grayscale[pixel] = data[i + 3] >= 128 ? gray(data[i], data[i + 1], data[i + 2]) : -1;
+  }
+  const edges = new Uint32Array(width);
+  const pairs = new Uint32Array(width);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const pixel = y * width + x;
+      const value = grayscale[pixel];
+      if (value < 0) continue;
+      if (x + 1 < width && grayscale[pixel + 1] >= 0) {
+        pairs[x]++;
+        if (Math.abs(value - grayscale[pixel + 1]) >= 20) edges[x]++;
+      }
+      if (y + 1 < height && grayscale[pixel + width] >= 0) {
+        pairs[x]++;
+        if (Math.abs(value - grayscale[pixel + width]) >= 20) edges[x]++;
+      }
+    }
+  }
+  let min = Infinity;
+  let max = -Infinity;
+  const columns = Array.from({ length: width }, (_, x) => {
+    if (!pairs[x]) return null;
+    let edgeCount = 0;
+    let pairCount = 0;
+    for (let i = Math.max(0, x - 2); i < Math.min(width, x + 3); i++) {
+      edgeCount += edges[i];
+      pairCount += pairs[i];
+    }
+    const density = edgeCount / pairCount;
+    min = Math.min(min, density);
+    max = Math.max(max, density);
+    return { edges: edgeCount, pairs: pairCount };
+  });
+  return { columns, min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0 };
+}
+
 function eventGroups(events) {
   const groups=new Map();
   for(const event of events) {
@@ -142,34 +184,126 @@ function eventGroups(events) {
   }
   return [...groups].sort((a,b)=>a[0]-b[0]).map(([beat,events])=>({beat,events}));
 }
+
+function prepareGrooveDrums(events) {
+  const kicks = events.filter(event => event.note === 36);
+  const lateKick = kicks.length === 1 && kicks[0].beat >= 3.75 ? kicks[0] : null;
+  const prepared = events.map(event => {
+    if (event.note === 36) {
+      const beat = event === lateKick ? 0 : Math.min(3.75, Math.round(event.beat * 4) / 4);
+      return { ...event, beat };
+    }
+    if ((event.note === 38 || event.note === 39) && event.velocity >= 100) {
+      // Anchor the backbeat and retain the original hat and ghost-note timings.
+      const beat = Math.max(1, Math.min(3, Math.round(event.beat)));
+      return { ...event, beat };
+    }
+    return event;
+  });
+  if (!prepared.some(event => event.note === 36 && event.beat === 0)) {
+    prepared.push({ beat: 0, duration: .12, note: 36, velocity: 110 });
+  }
+  return prepared.sort((a, b) => a.beat - b.beat);
+}
+
 const clipsByRole = new Map();
-for (const clip of [...pool.clips, ...addedClips]) {
+for (const clip of [...pool.clips, ...addedClips, ...expandedRhythmClips]) {
   if (clip.role === "strings" || clip.role === "lead_synth") continue;
   if (!clipsByRole.has(clip.role)) clipsByRole.set(clip.role, []);
-  clipsByRole.get(clip.role).push({ ...clip, groups: eventGroups(clip.events) });
+  let events = clip.events;
+  if (clip.role === "drums" && clip.source.title === "Google Magenta Groove MIDI Dataset") {
+    events = prepareGrooveDrums(events);
+  } else if (clip.role === "bass" && clip.source.title.startsWith("Groove MIDI Dataset")) {
+    // These parts reuse a drummer's kick timing. Snap only near-grid hits so
+    // the bass and the sequencer's quantized kick agree on those attacks.
+    events = events.map(event => {
+      const beat = Math.min(3.75, Math.round(event.beat * 4) / 4);
+      return Math.abs(beat - event.beat) <= 1 / 16 ? { ...event, beat } : event;
+    });
+  }
+  clipsByRole.get(clip.role).push({ ...clip, events, groups: eventGroups(events) });
 }
 const densityBand = density => density < .05 ? "sparse" : density <= .15 ? "medium" : "dense";
+
+const TOM_ENDINGS = {
+  sparse: [[3.25, 47, 82], [3.75, 43, 98]],
+  medium: [[3.25, 50, 80], [3.5, 47, 88], [3.75, 43, 103]],
+  dense: [[3, 50, 78], [3.25, 47, 86], [3.5, 47, 75], [3.75, 43, 104]],
+};
+
+function withTomEnding(clip) {
+  // Leave the final backbeat intact and clear room after it for the toms.
+  const events = clip.events.filter(({ beat, note }) => beat < 3 || (beat === 3 && [36, 38, 39].includes(note)));
+  for (const [beat, note, velocity] of TOM_ENDINGS[clip.densityBand]) {
+    events.push({ beat, note, velocity, duration: .12 });
+  }
+  return { ...clip, id: clip.id + "-tom-fill", sourceClipId: clip.id, events, groups: eventGroups(events) };
+}
 
 function assemblePhrase(ranked, variant) {
   const start = ((variant % ranked.length) + ranked.length) % ranked.length;
   const motif = ranked[start];
   const answer = ranked[(start + 1) % ranked.length];
-  // The sparse band has two clips. Leave room at the end of its answer
-  // so the fourth bar has its own ending without moving to a denser band.
-  const ending = ranked.length > 2 ? ranked[(start + 2) % ranked.length] : {
-    ...answer,
-    groups: answer.groups.length > 1 ? answer.groups.slice(0, -1) : answer.groups.map(group => ({
-      ...group, events: group.events.map(event => ({ ...event, duration: event.duration * .5 })),
-    })),
-  };
-  return [motif, answer, motif, ending];
+  const ending = ranked[(start + 2) % ranked.length];
+  return [motif, answer, motif, motif.role === "drums" ? withTomEnding(ending) : ending];
 }
 
-export function pickPhrase(role, density, variant) {
-  const clips = clipsByRole.get(role);
-  if (!clips?.length) return null;
-  const choices = clips.filter(clip => clip.densityBand === densityBand(density));
-  return assemblePhrase(choices.length ? choices : clips, variant);
+function rhythmSignature(phrase) {
+  return JSON.stringify(phrase.map(clip => clip.groups.map(group => [
+    Math.round(group.beat * 8),
+    group.events.map(event => Math.round(event.duration * 4)),
+  ])));
+}
+
+function* rhythmCandidates(role, density, variant, previous) {
+  const clips = (clipsByRole.get(role) ?? []).filter(clip => clip.densityBand === densityBand(density));
+  const excluded = previous ? rhythmSignature(previous) : null;
+  for (let offset = 0; offset < clips.length; offset++) {
+    const phrase = assemblePhrase(clips, variant + offset);
+    if (excluded === null || rhythmSignature(phrase) !== excluded) yield phrase;
+  }
+}
+
+export function pickPhrase(role, density, variant, previous = null) {
+  return rhythmCandidates(role, density, variant, previous).next().value ?? previous;
+}
+
+export function pickChordRhythm(role, density, variant, reference, previous = null) {
+  const onsetTolerance = 1 / 16; // Beats. Small timing differences can still share an attack.
+  let best = previous;
+  let bestOverlap = -1;
+  let fewestOnsets = Infinity;
+  for (const phrase of rhythmCandidates(role, density, variant, previous)) {
+    let matchingOnsets = 0;
+    let onsets = 0;
+    for (const [bar, clip] of phrase.entries()) {
+      const referenceGroups = reference[bar].groups;
+      onsets += clip.groups.length;
+      for (const { beat } of clip.groups) {
+        if (referenceGroups.some(group => Math.abs(group.beat - beat) <= onsetTolerance)) matchingOnsets++;
+      }
+    }
+    const overlap = matchingOnsets / Math.max(1, onsets);
+    if (overlap > bestOverlap || (overlap === bestOverlap && onsets < fewestOnsets)) {
+      best = phrase;
+      bestOverlap = overlap;
+      fewestOnsets = onsets;
+    }
+  }
+  return best;
+}
+
+export function pickBassForDrums(density, variant, drums, previous = null) {
+  let best = previous;
+  let score = -Infinity;
+  for (const phrase of rhythmCandidates("bass", density, variant, previous)) {
+    const fit = grooveFit(drums, phrase);
+    if (fit > score + 1e-8) {
+      best = phrase;
+      score = fit;
+    }
+  }
+  return best;
 }
 
 const leadByModeAndBand = new Map();
@@ -177,12 +311,6 @@ for (const phrase of rwcLeadPhrases) {
   const key = `${phrase.mode}:${phrase.densityBand}`;
   if (!leadByModeAndBand.has(key)) leadByModeAndBand.set(key, []);
   leadByModeAndBand.get(key).push(phrase);
-}
-
-const reverseLeadByMode = new Map();
-for (const phrase of [...rwcLeadPhrases, ...rwcReverseLeadPhrases]) {
-  if (!reverseLeadByMode.has(phrase.mode)) reverseLeadByMode.set(phrase.mode, []);
-  reverseLeadByMode.get(phrase.mode).push(phrase);
 }
 
 export function prepareLeadPhrase(phrase) {
@@ -202,63 +330,21 @@ export function prepareLeadPhrase(phrase) {
   };
 }
 
-export function pickLeadPhrase(density, variant, chordNotes, tonic, mode) {
-  const matching = leadByModeAndBand.get(`${mode}:${densityBand(density)}`);
-  if (!matching?.length) return null;
-  const ranked = rankLeadPhrases(matching, chordNotes, tonic);
+function melodySignature(phrase) {
+  const firstPitch = phrase.events[0][2];
+  return phrase.events.map(([, , pitch]) => pitch - firstPitch)
+    .filter((pitch, index, pitches) => pitch !== pitches[index - 1]).join(",");
+}
+
+export function pickLeadPhrase(density, variant, chordNotes, tonic, mode, previous = null) {
+  const matching = leadByModeAndBand.get(`${mode}:${densityBand(density)}`) ?? [];
+  const excluded = previous ? melodySignature(previous) : null;
+  const eligible = excluded === null ? matching : matching.filter(phrase => melodySignature(phrase) !== excluded);
+  if (!eligible.length) return previous;
+  const ranked = rankLeadPhrases(eligible, chordNotes, tonic);
   const best = ranked[0].score;
   const shortlist = ranked.slice(0, 5).filter(item => item.score >= best - .018);
   return prepareLeadPhrase(shortlist[variant % shortlist.length].phrase);
-}
-
-function differsAcrossBars(forward, reverse) {
-  const signature = clip => JSON.stringify(clip.groups.map(group => [
-    Math.round(group.beat * 8),
-    group.events.map(event => Math.round(event.duration * 4)),
-  ]));
-  return forward.filter((clip, index) => signature(clip) !== signature(reverse[index])).length >= 2;
-}
-
-function leadPitchContours(phrase) {
-  const bars = [[], [], [], []];
-  for (const [beat, , pitch] of phrase.events) bars[Math.floor(beat / 4)].push(pitch);
-  // Repeated hits and transposition do not make a new melodic contour.
-  const contour = pitches => pitches
-    .filter((pitch, index) => pitch !== pitches[index - 1])
-    .map(pitch => pitch - pitches[0]).join(",");
-  return { phrase: contour(bars.flat()), bars: bars.map(contour) };
-}
-
-function pickReverseLeadPhrase(forward, chordNotes, tonic, mode) {
-  const original = leadPitchContours(forward);
-  const ranked = rankLeadPhrases(reverseLeadByMode.get(mode), chordNotes, tonic);
-  const distinct = ranked.filter(({ phrase }) => {
-    if (phrase.source.track === forward.source.track) return false;
-    const next = leadPitchContours(phrase);
-    return next.phrase !== original.phrase && next.bars[0] !== original.bars[0]
-      && next.bars.filter((bar, index) => bar !== original.bars[index]).length >= 3;
-  });
-  const band = forward.densityBand;
-  const baseline = rankLeadPhrases(leadByModeAndBand.get(`${mode}:${band}`), chordNotes, tonic)[0].score;
-  const best = distinct.find(({ phrase, score }) => phrase.densityBand === band && score >= baseline - .018)
-    ?? distinct[0];
-  return best ? prepareLeadPhrase(best.phrase) : null;
-}
-
-function reverseOptions(region, chordNotes, tonic, mode) {
-  const forward = region.rhythmPhrase;
-  const role = region.instrument.id;
-  const band = densityBand(region.rhythmDensity);
-  if (role === "lead_synth" && region.leadPhrase) {
-    const lead = pickReverseLeadPhrase(region.leadPhrase, chordNotes, tonic, mode);
-    return lead ? [{ bars: lead.bars, lead }] : [];
-  }
-  const clips = clipsByRole.get(role) ?? [];
-  const matching = clips.filter(clip => clip.densityBand === band);
-  const first = matching.findIndex(clip => clip.id === forward[0]?.id);
-  return matching.map((_, index) => assemblePhrase(matching, first + index + 1))
-    .filter(bars => differsAcrossBars(forward, bars))
-    .map(bars => ({ bars, lead: null }));
 }
 
 function grooveFit(drums, bass) {
@@ -266,79 +352,11 @@ function grooveFit(drums, bass) {
     .filter(group => group.events.some(event => event.note === 36 || event.note === 35))
     .map(group => bar * 4 + group.beat));
   const hits = bass.flatMap((clip, bar) => clip.groups.map(group => bar * 4 + group.beat));
-  return Math.max(...[0, .5].map(offset => hits.filter(beat =>
-    kicks.some(kick => Math.abs(kick + offset - beat) < .09)).length)) / Math.max(1, hits.length);
-}
-
-function arpRhythmContrast(forward, reverse) {
-  return Math.min(...forward.map((clip, bar) => {
-    const a = clip.groups;
-    const b = reverse[bar].groups;
-    const shared = a.filter(group => b.some(other => Math.abs(group.beat - other.beat) < .07)).length;
-    return 1 - 2 * shared / (a.length + b.length);
-  }));
-}
-
-function reverseArpOptions(region, sameBand) {
-  const forward = region.rhythmPhrase;
-  const contrast = take => arpRhythmContrast(forward, take.bars);
-  const candidates = sameBand.filter(take => contrast(take) >= .35);
-  if (candidates.length) return candidates;
-  const clips = clipsByRole.get("counter_synth");
-  const otherBands = clips.filter(clip => clip.densityBand !== densityBand(region.rhythmDensity));
-  const alternatives = otherBands.map((_, index) => ({ bars: assemblePhrase(otherBands, index), lead: null }));
-  return [...sameBand, ...alternatives];
-}
-
-export function selectReverseArrangement(regions, chordNotes, tonic, mode) {
-  const options = regions.map(region => {
-    let alternatives = region.rhythmPhrase ? reverseOptions(region, chordNotes, tonic, mode) : [];
-    if (region.rhythmPhrase && region.instrument.id === "counter_synth") {
-      alternatives = reverseArpOptions(region, alternatives);
-    }
-    return alternatives.length ? alternatives : [{ bars: region.rhythmPhrase, lead: region.leadPhrase }];
-  });
-  const selected = options.map(items => items[0]);
-  const drums = regions.findIndex(region => region.instrument.id === "drums");
-  const bass = regions.findIndex(region => region.instrument.id === "bass");
-  if (drums >= 0 && bass >= 0) {
-    let best = -1;
-    for (const drumTake of options[drums]) for (const bassTake of options[bass]) {
-      const fit = grooveFit(drumTake.bars, bassTake.bars);
-      if (fit > best) {
-        best = fit;
-        selected[drums] = drumTake;
-        selected[bass] = bassTake;
-      }
-    }
-  }
-  const attackSlots = take => (take?.bars ?? []).flatMap((clip, bar) => clip.groups
-    .map(group => bar * 8 + Math.floor(group.beat * 2)));
-  const fitAround = (index, slots, contrast = () => 0) => {
-    const overlaps = take => {
-      const hits = attackSlots(take);
-      return hits.filter(slot => slots.has(slot)).length / Math.max(1, hits.length);
-    };
-    selected[index] = options[index].reduce((best, take) => {
-      const difference = contrast(take) - contrast(best);
-      return difference > 1e-8 || (Math.abs(difference) < 1e-8 && overlaps(take) < overlaps(best)) ? take : best;
-    });
-  };
-  const chordHits = new Set();
-  const lead = regions.findIndex(region => region.instrument.id === "lead_synth");
-  const leadHits = new Set(attackSlots(selected[lead]));
-  const drumHits = new Set(attackSlots(selected[drums]));
-  regions.forEach((region, index) => {
-    const role = region.instrument.id;
-    if (["pad", "organ", "guitar", "keys_mallet"].includes(role)) {
-      fitAround(index, chordHits);
-      for (const slot of attackSlots(selected[index])) chordHits.add(slot);
-    } else if (role === "counter_synth" && region.rhythmPhrase) {
-      fitAround(index, leadHits, take => arpRhythmContrast(region.rhythmPhrase, take.bars));
-    }
-    else if (role === "percussion_texture") fitAround(index, drumHits);
-  });
-  return selected;
+  const matches = offset => hits.filter(beat => kicks.some(kick => Math.abs(kick + offset - beat) < .09));
+  const unison = matches(0);
+  const downbeats = unison.filter(beat => Math.abs(beat - 4 * Math.round(beat / 4)) < .09);
+  return (.65 * unison.length + .15 * matches(.5).length) / Math.max(1, hits.length)
+    + .20 * downbeats.length / bass.length;
 }
 
 export function scanWindows(profile, threshold, totalBeats) {

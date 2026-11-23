@@ -1,7 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 
 const canvas = $("#artCanvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const ctx = canvas.getContext("2d");
 const canvasShell = $("#canvasShell");
 const setupScreen = $("#setupScreen");
 const modeScreen = $("#modeScreen");
@@ -21,6 +21,8 @@ const progressBar = $("#progressBar");
 const analysisPercent = $("#analysisPercent");
 const analysisMessage = $("#analysisMessage");
 const regionList = $("#regionList");
+const accompanimentList = $("#accompanimentList");
+const accompanimentEmpty = $("#accompanimentEmpty");
 const regionBadge = $("#regionBadge");
 const volumeSlider = $("#volumeSlider");
 const volumeValue = $("#volumeValue");
@@ -52,6 +54,7 @@ const gazeStability = $("#gazeStability");
 const gazeStabilityValue = $("#gazeStabilityValue");
 const gazeCursor = $("#gazeCursor");
 const calibrationOverlay = $("#calibrationOverlay");
+const calibrationStep = $("#calibrationStep");
 const calibrationTarget = $("#calibrationTarget");
 const calibrationProgress = $("#calibrationProgress");
 const calibrationCancel = $("#calibrationCancel");
@@ -68,10 +71,22 @@ const EYE_CLICK_MEMORY = 120;
 const EYE_RESULT_TIMEOUT_MS = 350;
 const EYE_REGION_DWELL_MS = 135;
 const EYE_REGION_RELEASE_MS = 190;
+const LINK_GAZE_MOTION_MS = 550;
 const EYE_FILTER_OPEN_SECONDS = .9;
 const EYE_FILTER_CLOSE_SECONDS = 1.3;
 const FILTERED_BACKING_LEVEL = .88;
+const SCAN_ACCOMPANIMENT_LEVEL = .30;
+const SCAN_ACCOMPANIMENT_DRUM_LEVEL = .46;
+const SCAN_ACCOMPANIMENT_TAIL_MS = 150;
+const MASTER_OUTPUT_GAIN = 1.35;
+const SCAN_ACCOMPANIMENT_ORDER = [
+  "drums", "bass", "pad", "guitar", "keys_mallet", "organ", "counter_synth", "percussion_texture", "lead_synth",
+];
+const CHORD_RHYTHM_ROLES = new Set(["guitar", "keys_mallet", "organ", "pad"]);
 const POINTER_DIRECTION_DISTANCE = .08;
+const MUSIC_LOOKAHEAD_MS = 280;
+const MUSIC_EVENT_BUFFER_MS = 45;
+const MUSIC_CHANGE_GUARD_MS = MUSIC_LOOKAHEAD_MS + 10;
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const MUSIC_MODES = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -297,24 +312,58 @@ const INSTRUMENT_SENDS = {
   lead_synth: { delay: .34, reverb: .38, chorus: .32 },
   counter_synth: { delay: .45, reverb: .32, chorus: .24 },
   drums: { delay: .09, reverb: .18, chorus: .04 },
-  bass: { delay: .08, reverb: .10, chorus: .12 },
+  bass: { delay: 0, reverb: 0, chorus: .12 },
   guitar: { delay: .37, reverb: .39, chorus: .30 },
   pad: { delay: .23, reverb: .54, chorus: .48 },
   organ: { delay: .12, reverb: .25, chorus: .34 },
   keys_mallet: { delay: .39, reverb: .35, chorus: .23 },
   percussion_texture: { delay: .10, reverb: .24, chorus: .06 },
 };
+const BASS_FIXED_SENDS = new Set(["delay", "reverb", "delayMix"]);
 function defaultInstrumentSends(role) {
-  return { ...(INSTRUMENT_SENDS[role] || INSTRUMENT_SENDS.pad), delayMix: .5, tremolo: 0 };
+  return { ...(INSTRUMENT_SENDS[role] || INSTRUMENT_SENDS.pad), delayMix: role === "bass" ? 0 : .5, tremolo: 0 };
 }
 
 const FM_SOUND = Object.fromEntries(INSTRUMENT_ROLES.map(({id}) => [id, {
   tone: .36, space: .56, volume: 1, sends: defaultInstrumentSends(id), patch: {},
 }]));
 const FM_VOLUME_STORAGE = "streetart:fm-instrument-volumes";
+// Baseline balance before the listener's saved per-instrument volume controls.
+const FM_MIX_TRIM = { drums: .72, organ: 1.6, counter_synth: 1.26, pad: 1.15, keys_mallet: .8 };
+const FM_INSTRUMENT_PAN = {
+  lead_synth: 0, bass: 0, drums: 0,
+  guitar: -.36, keys_mallet: .32, percussion_texture: .42,
+  counter_synth: -.24, organ: .18, pad: -.10,
+};
+const FM_DRUM_PAN = {
+  36: 0, 38: 0, 39: .12, 42: -.20, 46: -.24,
+  50: -.30, 47: .10, 43: .30, 49: .34,
+};
+
+function artworkPan(role, note) {
+  return (role === "drums" ? FM_DRUM_PAN[note] : undefined) ?? FM_INSTRUMENT_PAN[role] ?? 0;
+}
+
+let defaultFmBank;
+
+async function loadDefaultFmTakes() {
+  defaultFmBank ??= fetch("/static/fm-performance-bank.json?v=lead-selection1").then(async response => {
+    if (!response.ok) throw new Error(`FM preset bank returned ${response.status}`);
+    return STUDIO.fmBank.readPresetBank(await response.json());
+  });
+  try {
+    const bank = await defaultFmBank;
+    return bank.presets.length ? STUDIO.fmBank.drawFmTakes(bank) : null;
+  } catch (error) {
+    defaultFmBank = null;
+    console.warn("Using default FM sounds", error);
+    return null;
+  }
+}
 
 function fmInstrumentVolume(region) {
-  return COMPOSITION ? (FM_SOUND[region.instrument?.id]?.volume ?? 1) : 1;
+  const role = region.instrument?.id;
+  return COMPOSITION ? (FM_SOUND[role]?.volume ?? 1) * (FM_MIX_TRIM[role] ?? 1) : 1;
 }
 
 const ARTWORK_MUSIC = {
@@ -324,23 +373,77 @@ const ARTWORK_MUSIC = {
 
 function applyArtworkInstrument(region, role) {
   region.instrument = { ...role };
-  const seed = regionMusicSeed(region);
-  region.leadPhrase = role.id === "lead_synth"
-    ? COMPOSITION.pickLeadPhrase(region.rhythmDensity, seed, [0, 4, 8, 12].map(beat => harmonyAt(beat).tones),
-      musicRootMidi(), harmonyIsMinor() ? "minor" : "major")
-    : null;
-  region.rhythmPhrase = region.leadPhrase?.bars ?? COMPOSITION.pickPhrase(role.id, region.rhythmDensity, seed);
   return region;
 }
 
-function rebuildReverseArrangement() {
+function rebuildArtworkArrangements(lockedBeforeBar = 0) {
   if (!COMPOSITION || !state.regions.length) return;
   const regions = state.backingDrum ? [...state.regions, state.backingDrum.region] : state.regions;
-  const chords = [0, 4, 8, 12].map(beat => harmonyAt(beat).tones);
+  const boundRoles = new Set(state.regions.map(region => region.instrument.id));
+  const missingRoles = SCAN_ACCOMPANIMENT_ORDER.filter(role => !boundRoles.has(role));
+  const extraRegions = missingRoles.filter(role => role !== "drums").map(role => applyArtworkInstrument({
+    id: `scan-accompaniment-${role}`,
+    label: `Accompaniment · ${INSTRUMENTS_BY_ID.get(role).label}`,
+    accompaniment: true,
+    rhythmDensity: .1,
+    color_rgb: [128, 128, 128],
+  }, INSTRUMENTS_BY_ID.get(role)));
+  const sources = new Map(extraRegions.map(region => [region.instrument.id, region]));
+  if (state.backingDrum) sources.set("drums", state.backingDrum.region);
+  state.scan.accompaniment = missingRoles.map(role => {
+    const region = sources.get(role);
+    return { ...fallbackRegionVisual(region), region, x: .5, centroidY: .5,
+      intensity: role === "drums" ? SCAN_ACCOMPANIMENT_DRUM_LEVEL : SCAN_ACCOMPANIMENT_LEVEL, bars: [] };
+  });
+  rebuildScanAccompaniment(lockedBeforeBar);
+
+  const chordRegions = state.regions.filter(region => CHORD_RHYTHM_ROLES.has(region.instrument.id));
+  let chordReference = (chordRegions.length ? chordRegions : extraRegions)
+    .find(region => region.instrument.id === state.chordRhythmRole);
+  if (!chordReference) {
+    const eligible = chordRegions.length ? chordRegions : state.scan.accompaniment
+      .filter(item => item.bars.length && CHORD_RHYTHM_ROLES.has(item.region.instrument.id))
+      .map(item => item.region);
+    const roles = [...new Set(eligible.map(region => region.instrument.id))];
+    const chosen = roles.length > 1 ? roles[Math.floor(Math.random() * roles.length)] : roles[0];
+    chordReference = eligible.find(region => region.instrument.id === chosen);
+  }
+  state.chordRhythmRole = chordReference?.instrument.id ?? null;
+
+  const chordNotes = [0, 4, 8, 12].map(beat => harmonyAt(beat).tones);
   const tonic = musicRootMidi();
   const mode = harmonyIsMinor() ? "minor" : "major";
-  const reverse = COMPOSITION.selectReverseArrangement(regions, chords, tonic, mode);
-  regions.forEach((region, index) => { region.reverseTake = reverse[index]; });
+  const drums = regions.find(region => region.instrument.id === "drums");
+  const selectTakes = (region, reference = null) => {
+    const role = region.instrument.id;
+    const density = region.rhythmDensity;
+    const seed = regionMusicSeed(region);
+    const choose = (drumBars, referenceBars, previous) => {
+      if (role === "lead_synth") {
+        const lead = COMPOSITION.pickLeadPhrase(density, seed, chordNotes, tonic, mode, previous?.lead);
+        return { lead, bars: lead.bars };
+      }
+      let bars;
+      if (role === "bass" && drumBars) {
+        bars = COMPOSITION.pickBassForDrums(density, seed, drumBars, previous?.bars);
+      } else if (referenceBars) {
+        bars = COMPOSITION.pickChordRhythm(role, density, seed, referenceBars, previous?.bars);
+      } else {
+        bars = COMPOSITION.pickPhrase(role, density, seed, previous?.bars);
+      }
+      return { lead: null, bars };
+    };
+    const forward = choose(drums?.rhythmPhrase, reference?.rhythmPhrase);
+    region.rhythmPhrase = forward.bars;
+    region.leadPhrase = forward.lead;
+    region.reverseTake = choose(drums?.reverseTake?.bars, reference?.reverseTake.bars, forward);
+  };
+  if (drums) selectTakes(drums);
+  if (chordReference) selectTakes(chordReference);
+  for (const region of [...regions, ...extraRegions]) {
+    if (region === drums || region === chordReference) continue;
+    selectTakes(region, CHORD_RHYTHM_ROLES.has(region.instrument.id) ? chordReference : null);
+  }
 }
 
 function instrumentIdForArtwork(id) {
@@ -359,6 +462,8 @@ function assignArtworkRoles(regions) {
 
 const state = {
   manifest: null,
+  fmTakes: null,
+  chordRhythmRole: null,
   image: null,
   imagePixels: null,
   selectedFile: null,
@@ -368,7 +473,7 @@ const state = {
   regionPreview: null,
   backingDrum: null,
   mode: "scan",
-  link: { enabled: false, region: null, focus: new Map(), lastAt: 0 },
+  link: { enabled: false, region: null, focus: new Map(), lastAt: 0, gazeSamples: [], takeChanges: new Map() },
   effectTrims: { reverb: 1, chorus: 1, delay: 1, feedback: 1, chorusDepth: 1, effectTone: 1 },
   setupComplete: false,
   analyzing: false,
@@ -409,10 +514,9 @@ const state = {
     smoothY: null,
     lastSmoothAt: 0,
     lastResultAt: -Infinity,
-    calibrationIndex: 0,
-    calibrationClicks: 0,
-    calibrationTargets: [],
-    previousCalibration: null,
+    calibration: null,
+    calibrations: null,
+    calibrationLayout: null,
     startupTimer: 0,
     rawHistory: [],
     candidateRegionId: null,
@@ -446,6 +550,9 @@ const state = {
     regions: [],
     ensemble: [],
     voiceRegions: [],
+    detailProfile: null,
+    accompaniment: [],
+    accompanimentBlocks: [],
     regionMix: new Map(),
     lastMixAt: 0,
   },
@@ -839,6 +946,25 @@ function phraseClipAtBar(region, bar, reverse = false) {
   return phrase[bar % phrase.length];
 }
 
+function leadLegatoGate(region, bar, groupIndex, windowEnd, reverse, scanning, beatMs) {
+  const groups = phraseClipAtBar(region, bar, reverse).groups;
+  const current = groups[groupIndex];
+  let next = groups[groupIndex + 1];
+  let nextBar = bar;
+  if (!next && (bar + 1) % region.rhythmPhrase.length !== 0 && reverseForRegionAtBar(region, bar + 1, scanning) === reverse) {
+    nextBar = bar + 1;
+    next = phraseClipAtBar(region, nextBar, reverse).groups[0];
+  }
+  if (current.events.length !== 1 || next?.events.length !== 1) return null;
+  const [from] = current.events;
+  const [to] = next.events;
+  if (from.semitoneOffset === to.semitoneOffset) return null;
+  const nextOnset = nextBar * 4 + next.beat;
+  const gate = nextOnset - (bar * 4 + current.beat);
+  // Close only the small gaps between adjacent melody notes, keeping rests and pulse intact.
+  return nextOnset < windowEnd && (gate - from.duration) * beatMs <= 12 ? gate : null;
+}
+
 function clipEvent(region, nx, ny, onset, groupIndex, visual, maxLength = Infinity, reverse = false) {
   const role = region.instrument.id;
   const chord = harmonyAt(onset);
@@ -905,6 +1031,7 @@ function clipEvent(region, nx, ny, onset, groupIndex, visual, maxLength = Infini
   return {
     eventId: `${region.id}:${clip?.id}:${chord.barIndex}:${groupIndex}`,
     rhythmClip: clip?.id, densityBand: clip?.densityBand, behavior: region.instrument.behavior,
+    reverseTake: reverse,
     ...(lead ? { leadPhrase: lead.id } : {}),
     patternStep: groupIndex, patternPositionBeats: group?.beat ?? null,
     eventKind: notes.length>1?"chord":"note", accent: eventList.some(e=>e.accent || e.velocity>=107),
@@ -920,7 +1047,7 @@ function clipEvent(region, nx, ny, onset, groupIndex, visual, maxLength = Infini
 function musicEventForRegion(region, nx, ny, beatPosition, speed = 0, intensity = 1, forceStart = false, visual = null) {
   if (COMPOSITION && region.rhythmPhrase) {
     const bar = Math.max(0, Math.floor(beatPosition / 4));
-    const reverse = reverseAtBar(bar);
+    const reverse = reverseForRegionAtBar(region, bar, !usesPointerPlayback());
     const groups = phraseClipAtBar(region, bar, reverse).groups;
     const phase = positiveModulo(beatPosition,4);
     const exact = groups.findIndex(group=>Math.abs(group.beat-phase)<.0001);
@@ -1025,13 +1152,13 @@ const ROLE_FX = {
   guitar:[.92,1.12,.96], strings:[1.22,1.14,.65], organ:[.54,.42,.34], pad:[1.38,1.38,.77],
 };
 
-function artworkControls(role, x, speed, mix, accent, color) {
+function artworkControls(role, speed, mix, accent, color) {
   const { tone, space, sends } = FM_SOUND[role];
   const width = ROLE_FX[role]?.[1] ?? 1;
   const sustained = ["pad", "strings"].includes(role);
   const drum = ["drums", "percussion_texture"].includes(role);
   return {
-    movement: clampUnit(speed), pan: clampUnit(x, .5), expression: clampUnit(mix, 1),
+    movement: clampUnit(speed), pan: (artworkPan(role) + 1) / 2, expression: clampUnit(mix, 1),
     harmonicIntensity: clampUnit(.31 + .24 * tone),
     brightness: clampUnit(.27 + .36 * tone + (accent && role === "bass" ? .14 : 0)),
     attack: sustained ? .475 : drum ? .065 : .135,
@@ -1040,7 +1167,7 @@ function artworkControls(role, x, speed, mix, accent, color) {
     chorus: clampUnit((.124 + space * .26) * width),
     sends: color ? {
       ...sends,
-      delayMix: Math.min(color.hue, 1 - color.hue) * 2,
+      delayMix: role === "bass" ? 0 : Math.min(color.hue, 1 - color.hue) * 2,
       reverb: clampUnit(sends.reverb * (1.6 - 1.2 * color.value)),
       chorus: clampUnit(sends.chorus * (.7 + 1.5 * color.contrast)),
       tremolo: clampUnit(sends.tremolo + .5 * color.saturation),
@@ -1050,7 +1177,7 @@ function artworkControls(role, x, speed, mix, accent, color) {
 
 function performanceControls(region, visual, x, speed, mix, accent = false, effectColor = null) {
   const role = region.instrument?.id || "lead_synth";
-  if (COMPOSITION) return artworkControls(role, x, speed, mix, accent, effectColor);
+  if (COMPOSITION) return artworkControls(role, speed, mix, accent, effectColor);
   const source = visual || fallbackRegionVisual(region);
   const gems = gemsControlFeatures();
   const roleEffects = roleGemsEffects(role);
@@ -1188,7 +1315,23 @@ function reverseAtBar(bar, scanning = !usesPointerPlayback()) {
   return reverse;
 }
 
-function musicBeatPosition(scanning = !usesPointerPlayback(), now = performance.now()) {
+function linkedTakeAtBar(bar) {
+  let take = null;
+  for (const [changeBar, change] of state.link.takeChanges) {
+    if (changeBar > bar) break;
+    take = change;
+  }
+  return take;
+}
+
+function reverseForRegionAtBar(region, bar, scanning) {
+  const gazeTake = scanning && state.scan.playing && !state.regionPreview ? linkedTakeAtBar(bar) : null;
+  return gazeTake && gazeTake.role === region.instrument?.id
+    ? gazeTake.reverse
+    : reverseAtBar(bar, scanning);
+}
+
+function musicBeatPosition(scanning = !usesPointerPlayback(), now = soundEngine.musicTime()) {
   if (state.regionPreview?.item) {
     return (now - state.regionPreview.startedAt) * state.music.bpm / 60000;
   }
@@ -1196,6 +1339,52 @@ function musicBeatPosition(scanning = !usesPointerPlayback(), now = performance.
     ? state.scan.startedFrom + (now - state.scan.startedAt) / 1000
     : (scanning ? state.scan.seconds : pointerMusicSeconds(now));
   return seconds * state.music.bpm / 60 + (scanning ? state.scan.beatOffset : 0);
+}
+
+function heldLeadAtScanStart(region, x, y, visual, beat, from, to) {
+  const bar = Math.round(beat / 4);
+  const reverse = reverseForRegionAtBar(region, bar, true);
+  if (phraseClipAtBar(region, bar, reverse).groups[0]?.beat === 0) return null;
+
+  const phraseStart = bar - bar % region.rhythmPhrase.length;
+  for (let previous = bar - 1; previous >= phraseStart; previous--) {
+    if (reverseForRegionAtBar(region, previous, true) !== reverse) break;
+    const groups = phraseClipAtBar(region, previous, reverse).groups;
+    if (!groups.length) continue;
+    const onset = previous * 4 + groups.at(-1).beat;
+    if (onset < from) break;
+    const event = clipEvent(region, x, y, onset, groups.length - 1, visual, to - onset, reverse);
+    const durations = Object.fromEntries(Object.entries(event.noteDurations)
+      .map(([note, duration]) => [note, onset + duration - beat])
+      .filter(([, remaining]) => remaining > .001));
+    const notes = event.notes.filter(note => durations[note] !== undefined);
+    if (!notes.length) break;
+    const chord = harmonyAt(bar * 4);
+    return {
+      ...event,
+      notes,
+      note: notes[0],
+      noteDurations: durations,
+      durationBeats: Math.max(...Object.values(durations)),
+      patternPositionBeats: 0,
+      continued: true,
+      harmony: { ...event.harmony, bar: bar + 1, degree: chord.degree, progression: chord.progression },
+    };
+  }
+  return null;
+}
+
+function turnaroundBassEvent(region, x, y, visual, beat, end, reverse) {
+  const event = clipEvent(region, x, y, beat, 0, visual, end - beat, reverse);
+  const note = 24 + positiveModulo(harmonyAt(beat).tones[0], 12);
+  const velocity = event.velocity || 80;
+  const duration = Math.min(.85, end - beat);
+  return {
+    ...event, turnaroundBass: true, patternPositionBeats: 0, notes: [note], note,
+    velocity, noteVelocities: { [note]: velocity },
+    durationBeats: duration, noteDurations: { [note]: duration },
+    eventKind: "note", accent: false, slide: false,
+  };
 }
 
 function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
@@ -1211,7 +1400,8 @@ function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
   const enabled = soundEngine.enabled;
   const signature = [state.manifest?.analysis_id, enabled, running, Math.round(anchor), preview?.region.id,
     state.music.bpm, state.music.root, state.music.mode, currentArrangement().id, running ? "" : beatPosition].join("|");
-  if (signature !== scheduler.signature) {
+  const changedTransport = signature !== scheduler.signature;
+  if (changedTransport) {
     scheduler.signature = signature;
     scheduler.session++;
     scheduler.seen.clear();
@@ -1221,7 +1411,35 @@ function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
   const firstTick = Math.max(0, Math.ceil((beatPosition - 145 / beatMs) * 12 - 1e-6));
   const lastTick = Math.floor(beatPosition * 12 + 1e-6);
   const events = [];
+  const musicBars = [];
   const active = new Set();
+  const musicTime = onset => clockMs - now + anchor + onset * beatMs + MUSIC_EVENT_BUFFER_MS;
+  const request = state.scan.startRequest;
+  const pointerEnd = !preview && request?.pointerAnchor === state.musicTimeline.startedAt ? request.takeoverBeat : Infinity;
+  const scanStartBeat = runningScan ? state.scan.beatOffset + state.scan.startedFrom * 1000 / beatMs : 0;
+  const musicSince = Math.max(scanStartBeat, beatPosition - 35 / beatMs);
+  const musicThrough = beatPosition + MUSIC_LOOKAHEAD_MS / beatMs;
+  // Starting or seeking at a turnaround begins with the current take.
+  const turnsAtBar = bar => runningScan && bar * 4 > scanStartBeat + 1e-6
+    && reverseAtBar(bar, true) !== reverseAtBar(bar - 1, true);
+  const chaseLead = changedTransport && runningScan && state.scan.startedFrom > 0
+    && musicSince <= scanStartBeat + 1e-6;
+  if (COMPOSITION && enabled && running) {
+    const scanEndBar = state.scan.route.at(-1)?.endBar;
+    const end = runningScan && Number.isFinite(scanEndBar) ? state.scan.beatOffset + 4 * scanEndBar : pointerEnd;
+    for (let bar = Math.max(0, Math.ceil((musicSince - 1e-6) / 4)); bar * 4 <= musicThrough && bar * 4 < end; bar++) {
+      const key = `@bar:${bar}`;
+      if (scheduler.seen.has(key)) continue;
+      scheduler.seen.set(key, { onset: bar * 4 });
+      const gazeTake = runningScan ? linkedTakeAtBar(bar) : null;
+      musicBars.push({ scheduledAtMs: musicTime(bar * 4), reverse: reverseAtBar(bar, scanning),
+        ...(turnsAtBar(bar) && { turnaround: true }),
+        ...(gazeTake && { gazeTake }),
+        chordDegree: harmonyAt(bar * 4).degree,
+        ...(runningScan && { accompaniment: scanAccompanimentAt(bar * 4).map(item => item.region.id) }),
+      });
+    }
+  }
   const append = (voice, region, event, onset) => {
     const key = `${region.id}:${COMPOSITION ? onset.toFixed(6) : Math.round(onset * 12)}`;
     if (scheduler.seen.has(key)) return;
@@ -1232,7 +1450,7 @@ function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
       ...event,
       eventId: `${scheduler.session}:${key}`,
       onsetBeat: onset,
-      scheduledAtMs: clockMs + (onset - beatPosition) * beatMs + (COMPOSITION ? 20 : 180),
+      scheduledAtMs: COMPOSITION ? musicTime(onset) : clockMs + (onset - beatPosition) * beatMs + 180,
       controls: {
         ...performanceControls(region, voice.timbre, x, voice.controls.movement, voice.mix, event.accent),
         ...(COMPOSITION && voice.controls.sends && { sends: voice.controls.sends }),
@@ -1244,23 +1462,60 @@ function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
     const region = findMusicSource(voice.regionId);
     if (!region) continue;
     if (COMPOSITION && region.rhythmPhrase) {
-      if (!enabled) continue;
+      if (!enabled || !running) continue;
       const {x,y}=voice.position;
-      const request = state.scan.startRequest;
-      const pointerEnd = !preview && request?.pointerAnchor === state.musicTimeline.startedAt ? request.takeoverBeat : Infinity;
       const windows = runningScan ? (voice.windows ?? (voice.window ? [voice.window] : [])) : [{ from: 0, to: pointerEnd }];
       for (const { from, to } of windows) {
-        const scanStartBeat = runningScan ? state.scan.beatOffset + state.scan.startedFrom * 1000 / beatMs : 0;
-        const since = Math.max(from, scanStartBeat, beatPosition - 95 / beatMs);
-        const through = Math.min(to - 1e-7, beatPosition + 35 / beatMs);
+        if (chaseLead && region.instrument.id === "lead_synth" && from < scanStartBeat && scanStartBeat < to) {
+          const resumedBeat = Math.round(scanStartBeat / 4) * 4;
+          const held = heldLeadAtScanStart(region, x, y, voice.timbre, resumedBeat, from, to);
+          if (held) append(voice, region, held, resumedBeat);
+        }
+        const since = Math.max(from, musicSince);
+        const through = Math.min(to - 1e-7, musicThrough);
         for (let bar = Math.max(0, Math.floor(since / 4)); bar <= Math.floor(through / 4); bar++) {
-          const reverse = reverseAtBar(bar, scanning);
-          phraseClipAtBar(region, bar, reverse).groups.forEach((group, i) => {
-            const onset = bar * 4 + group.beat;
-            if (onset < since - 1e-6 || onset > through + 1e-6 || onset >= to) return;
-            const event = clipEvent(region, x, y, onset, i, voice.timbre, to - onset, reverse);
-            if (event.notes.length) append(voice, region, event, onset);
-          });
+          const barBeat = bar * 4;
+          const reverse = reverseForRegionAtBar(region, bar, scanning);
+          const role = region.instrument.id;
+          const connectsAtTurn = from < barBeat && through >= barBeat && turnsAtBar(bar)
+            && reverse !== reverseForRegionAtBar(region, bar - 1, scanning);
+          let firstBeatCarried = false;
+          const queueClip = (take, firstBeat, lastBeat) => {
+            phraseClipAtBar(region, bar, take).groups.forEach((group, i) => {
+              const onset = barBeat + group.beat;
+              if (group.beat < firstBeat || group.beat >= lastBeat
+                || onset < since - 1e-6 || onset > through + 1e-6 || onset >= to) return;
+              let end = to;
+              if (role === "lead_synth") {
+                const heldUntil = Math.min(end, onset + Math.max(...group.events.map(event => event.duration)));
+                for (let nextBar = bar + 1; nextBar * 4 < heldUntil; nextBar++) {
+                  if (reverseForRegionAtBar(region, nextBar, scanning) === take) continue;
+                  end = nextBar * 4;
+                  break;
+                }
+              }
+              const event = clipEvent(region, x, y, onset, i, voice.timbre, end - onset, take);
+              if (role === "lead_synth" && event.notes.length === 1) {
+                const gate = leadLegatoGate(region, bar, i, end, take, scanning, beatMs);
+                if (gate !== null) {
+                  event.noteDurations[event.note] = event.durationBeats = gate;
+                  event.legatoToBeat = onset + gate;
+                }
+              }
+              if (event.notes.length) append(voice, region, event, onset);
+            });
+          };
+          if (connectsAtTurn && role === "drums") {
+            const outgoing = phraseClipAtBar(region, bar, !reverse);
+            firstBeatCarried = outgoing.groups.some(group => group.beat < 1 && group.events.length);
+            if (firstBeatCarried) queueClip(!reverse, 0, 1);
+          } else if (connectsAtTurn && role === "bass") {
+            firstBeatCarried = true;
+            if (barBeat >= since - 1e-6) {
+              append(voice, region, turnaroundBassEvent(region, x, y, voice.timbre, barBeat, to, reverse), barBeat);
+            }
+          }
+          queueClip(reverse, firstBeatCarried ? 1 : 0, 4);
         }
       }
       continue;
@@ -1286,12 +1541,12 @@ function scheduleMusicEvents(voices, beatPosition, now = performance.now()) {
   }
   scheduler.active = active;
   for (const [key, event] of scheduler.seen) {
-    if (event.onset < beatPosition - 2 || (!runningScan && !active.has(event.regionId))) scheduler.seen.delete(key);
+    if (event.onset < beatPosition - 2 || (!runningScan && event.regionId && !active.has(event.regionId))) scheduler.seen.delete(key);
   }
-  return { transportId: `${performance.timeOrigin}:${scheduler.session}`, scheduledEvents: events };
+  return { transportId: `${performance.timeOrigin}:${scheduler.session}`, scheduledEvents: events, musicBars };
 }
 
-function pointerMusicSeconds(now = performance.now()) {
+function pointerMusicSeconds(now = soundEngine.musicTime()) {
   const timeline = state.musicTimeline;
   return timeline.running ? Math.max(0, (now - timeline.startedAt) / 1000) : 0;
 }
@@ -1676,7 +1931,7 @@ function drawCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(state.image, 0, 0, canvas.width, canvas.height);
   const preview = state.regionPreview?.item;
-  const visibleRegions = preview ? [preview] : usesPointerPlayback()
+  const visibleRegions = preview ? (preview.region.accompaniment ? [] : [preview]) : usesPointerPlayback()
     ? (state.activeRegion ? [{ region: state.activeRegion, intensity: 1 }] : [])
     : [...state.scan.regions];
   const linkedRegion = !preview && state.scan.playing && state.link.enabled ? state.link.region : null;
@@ -1746,17 +2001,19 @@ function changeRegionInstrument(region, instrumentId) {
   const role = INSTRUMENT_ROLES.find((instrument) => instrument.id === instrumentId);
   if (!role || role.id === region.instrument.id) return;
 
+  if (state.regionPreview?.region.accompaniment) stopRegionPreview();
+  if (state.link.region === region) resetLinkedFocus();
   applyArtworkInstrument(region, role);
 
   // Cancel queued notes for the old instrument.
   state.scheduler.signature = null;
   const preview = state.regionPreview?.item;
   if (preview?.region === region) {
-    state.regionPreview.startedAt = performance.now();
+    state.regionPreview.startedAt = soundEngine.musicTime();
   }
-  updateRegionInstrumentControls();
   rebuildBackingDrum();
-  rebuildReverseArrangement();
+  rebuildArtworkArrangements();
+  updateRegionInstrumentControls();
   updateScanPathControls();
   if (state.activeRegion) activateRegion(state.activeRegion, false, false);
   if (state.scan.playing) setScanPosition(state.scan.seconds, true);
@@ -1809,36 +2066,45 @@ function renderRegionList() {
   if (COMPOSITION) updateRegionInstrumentControls();
 }
 
-async function loadAnalysis(manifest) {
+async function loadAnalysis(manifest, savedSettings) {
   setAnalysisProgress(92, "Preparing the interactive regions…");
   const imageUrl = manifest.image_url;
   const loadedImage = await imageFromUrl(imageUrl.startsWith("data:")
     ? imageUrl : `${imageUrl}${imageUrl.includes("?") ? "&" : "?"}v=${Date.now()}`);
   const imagePixels = readImagePixels(loadedImage);
   const groups = groupDetectedRegions(manifest.regions);
-  const loadedRegions = await Promise.all(groups.slice(0, INSTRUMENT_ROLES.length)
-    .map(detections => prepareMask(detections, imagePixels)));
+  const [loadedRegions, fmTakes] = await Promise.all([
+    Promise.all(groups.slice(0, INSTRUMENT_ROLES.length).map(detections => prepareMask(detections, imagePixels))),
+    !STUDIO ? null : savedSettings === undefined ? loadDefaultFmTakes() : STUDIO.fmBank.readFmTakes(savedSettings.fmTakes ?? null),
+  ]);
   resetScan(false);
   resetPointerPlayback(true);
   soundEngine.clearRegionVoices();
   state.activeRegion = null;
   state.manifest = manifest;
+  state.fmTakes = fmTakes;
+  state.chordRhythmRole = CHORD_RHYTHM_ROLES.has(savedSettings?.chordRhythmRole) ? savedSettings.chordRhythmRole : null;
+  soundEngine.syncPerformancePatches();
+  refreshFmEditor();
   state.image = loadedImage;
   state.imagePixels = imagePixels;
+  state.scan.detailProfile = COMPOSITION ? COMPOSITION.scanEdgeProfile(imagePixels) : null;
+  state.scan.accompaniment = [];
+  state.scan.accompanimentBlocks = [];
   if (COMPOSITION) state.artworkMusic = COMPOSITION.artworkSettings(imagePixels, manifest.artist_statement, manifest.statement_colors);
   state.regions = assignArtworkRoles(loadedRegions);
+  applyPresetRegionInstruments(savedSettings?.regionInstruments);
   rebuildBackingDrum();
-  rebuildScanRoute();
-  state.scan.position = state.scan.route[0]?.from ?? 0;
   if (COMPOSITION) {
     const music = state.artworkMusic;
     musicBpm.value=String(music.bpm);
     musicRoot.value=music.root;
     musicMode.value=music.mode;
-    applyMusicSettings(false);
+    applyMusicSettings(false, true);
     $("#artworkMusicDetails").textContent =
       `Tempo: ${music.tempoSource} · ${music.colors.map(color=>color.name+" ("+color.source+")").join(", ")}. Root: ${music.dominantHue || "no chromatic pixels"}. Average grayscale: ${music.grayscale.toFixed(1)} / 255.`;
   } else {
+  rebuildScanRoute();
   state.gems = normalizeGemsProfile(manifest.gems_profile);
   renderGemsProfile();
   state.arrangement.choice = "auto";
@@ -1854,7 +2120,7 @@ async function loadAnalysis(manifest) {
   }
   $("#musicSourceStatus").textContent = `GEMS-9 · ${gemsProfileName()} · ${harmonyPlanSummary()}`;
   }
-  rebuildReverseArrangement();
+  state.scan.position = state.scan.route[0]?.from ?? 0;
   $("#thumbImage").src = manifest.image_url;
   fitCanvas();
   renderRegionList();
@@ -2060,17 +2326,33 @@ function usesScanBacking() {
   return state.link.enabled || state.scan.voiceMode === "backing";
 }
 
-function setLinkedRegion(region) {
-  if (state.link.region === region) return;
-  state.link.region = region;
+function setLinkedRegion(region, reverse = null) {
+  const link = state.link;
+  if (link.region === region) return;
+  link.region = region;
+  if (COMPOSITION && state.scan.playing && (reverse !== null || link.takeChanges.size)) {
+    const bar = Math.floor(musicBeatPosition(true, soundEngine.musicTime() + MUSIC_CHANGE_GUARD_MS) / 4) + 1;
+    const endBar = (state.scan.route.at(-1)?.endBar ?? 0) + state.scan.beatOffset / 4;
+    if (bar < endBar) {
+      // The newest landing may replace a request until that bar enters the audio queue.
+      link.takeChanges.set(bar, reverse === null ? null : { role: region.instrument.id, reverse });
+    }
+  }
   syncRegionButtons();
   drawCanvas();
+}
+
+function resetLinkedTake() {
+  state.link.gazeSamples.length = 0;
+  state.link.takeChanges.clear();
+  resetEyeRegionStability();
 }
 
 function resetLinkedFocus() {
   state.link.region = null;
   state.link.focus.clear();
   state.link.lastAt = 0;
+  resetLinkedTake();
 }
 
 function linkedScanVoices(items, now) {
@@ -2078,6 +2360,8 @@ function linkedScanVoices(items, now) {
   if (state.eye.active && (!state.eye.calibrated || now - state.eye.lastResultAt >= EYE_RESULT_TIMEOUT_MS ||
       (state.eye.outsideArtworkSince !== null && now - state.eye.outsideArtworkSince >= EYE_REGION_RELEASE_MS))) {
     setLinkedRegion(null);
+    link.gazeSamples.length = 0;
+    resetEyeRegionStability();
   }
   const delta = link.lastAt ? Math.min(.12, (now - link.lastAt) / 1000) : 0;
   link.lastAt = now;
@@ -2122,7 +2406,6 @@ function rebuildBackingDrum() {
     state.backingDrum = { region, ...visual, visual, intensity: .58, x: .5, y: .5, centroidY: .5 };
   }
   if (!available) state.backingDrum = null;
-  $("#backingDrumStatus").hidden = !available;
 }
 
 function pointerMusicLayers() {
@@ -2132,7 +2415,8 @@ function pointerMusicLayers() {
 
 function findMusicSource(id) {
   return state.regions.find(region => region.id === id)
-    || (id === state.backingDrum?.region.id ? state.backingDrum.region : undefined);
+    || (id === state.backingDrum?.region.id ? state.backingDrum.region : undefined)
+    || state.scan.accompaniment.find(item => item.region.id === id)?.region;
 }
 
 function rebuildScanRoute() {
@@ -2143,7 +2427,7 @@ function rebuildScanRoute() {
     COMPOSITION ? durationBars : undefined));
 }
 
-function setScanRoute(route) {
+function setScanRoute(route, lockedBeforeBar = 0) {
   state.scan.route = route;
   if (!COMPOSITION) return;
   const durationBars = state.scan.duration * state.music.bpm / 240;
@@ -2154,6 +2438,48 @@ function setScanRoute(route) {
     const sample = peakColumn < 0 ? regionPeakSample(region)
       : regionPlaybackSample(region, (peakColumn + .5) / region.scanColumns.length);
     return { ...sample, passages, bars: STUDIO.scan.quantizePassages(passages, durationBars, endBar) };
+  });
+  rebuildScanAccompaniment(lockedBeforeBar);
+  // A custom route can introduce the first chord accompaniment in this session.
+  if (!state.chordRhythmRole && state.scan.accompaniment.some(item =>
+    item.bars.length && CHORD_RHYTHM_ROLES.has(item.region.instrument.id))) {
+    rebuildArtworkArrangements(lockedBeforeBar);
+  }
+}
+
+function rebuildScanAccompaniment(lockedBeforeBar = 0) {
+  if (!STUDIO) return;
+  const { accompaniment, accompanimentBlocks, detailProfile, route, duration } = state.scan;
+  const blocks = STUDIO.scan.planScanAccompaniment(detailProfile, route, duration * state.music.bpm / 240,
+    accompaniment.length, accompanimentBlocks, lockedBeforeBar);
+  state.scan.accompanimentBlocks = blocks;
+  accompaniment.forEach((item, index) => {
+    item.bars = [];
+    for (const block of blocks) {
+      if (index >= block.count) continue;
+      const previous = item.bars.at(-1);
+      if (previous?.to === block.startBar) previous.to = block.endBar;
+      else item.bars.push({ from: block.startBar, to: block.endBar });
+    }
+  });
+}
+
+function scanAccompanimentAt(beat) {
+  const { accompaniment, accompanimentBlocks, beatOffset } = state.scan;
+  const bar = (beat - beatOffset) / 4;
+  const block = accompanimentBlocks.find(item => bar >= item.startBar && bar < item.endBar);
+  return block ? accompaniment.slice(0, block.count) : [];
+}
+
+function scanAccompanimentForScheduling(beat) {
+  const { accompaniment, beatOffset } = state.scan;
+  const beatsPerMs = state.music.bpm / 60000;
+  const until = beat + MUSIC_LOOKAHEAD_MS * beatsPerMs;
+  const since = beat - SCAN_ACCOMPANIMENT_TAIL_MS * beatsPerMs;
+  return accompaniment.flatMap(item => {
+    const windows = item.bars.map(({ from, to }) => ({ from: beatOffset + 4 * from, to: beatOffset + 4 * to }))
+      .filter(span => span.from <= until + 1e-6 && span.to >= since);
+    return windows.length ? [{ ...item, windows }] : [];
   });
 }
 
@@ -2187,7 +2513,7 @@ function updateScanEnsemble(nx) {
       focused.push({ ...sample, intensity: emphasis });
     }
     const windows = backing ? [{ from: offset, to: end }] : reference.bars
-      .filter(span => beat + .05 / beatSeconds >= span.from * 4 && beat - .1 / beatSeconds < span.to * 4)
+      .filter(span => beat + MUSIC_LOOKAHEAD_MS / 1000 / beatSeconds >= span.from * 4 && beat - .1 / beatSeconds < span.to * 4)
       .map(span => ({ from: offset + span.from * 4, to: offset + span.to * 4 }));
     if (!windows.length) {
       state.scan.regionMix.delete(region.id);
@@ -2197,8 +2523,6 @@ function updateScanEnsemble(nx) {
     return [{ ...sample, intensity: level, windows, scanCutoffHz,
       effectColor: scanEffectColor(region, nx) }];
   }).sort((a, b) => b.intensity - a.intensity);
-  const drum = state.backingDrum;
-  if (drum) state.scan.voiceRegions.push({ ...drum, windows: [{ from: offset, to: end }] });
   state.scan.regions = focused.sort((a, b) => b.intensity - a.intensity);
 }
 
@@ -2309,11 +2633,14 @@ async function previewRegion(region) {
     stopRegionPreview();
     return;
   }
-  preview.item = regionPeakSample(region);
+  preview.item = region.accompaniment
+    ? { ...fallbackRegionVisual(region), region, x: .5, centroidY: .5, intensity: 1 }
+    : regionPeakSample(region);
   soundEngine.setScanEnvelope();
   if (usesPointerPlayback()) soundEngine.setPointerEnvelope(1);
-  activateRegion(region, false, false);
-  preview.startedAt = performance.now();
+  if (region.accompaniment) $("#currentRegion").textContent = `Previewing ${region.instrument.label}`;
+  else activateRegion(region, false, false);
+  preview.startedAt = soundEngine.musicTime();
   updatePerformance(true);
 }
 
@@ -2393,8 +2720,52 @@ function renderAutomaticControls(voices, now, force = false) {
       meter.dataset.autoSource === "fx" ? (first.controls.sends?.[name] ?? soundEngine.effectMemory[name]) : first.controls[name])) : 0;
     if (meter.value !== value) meter.value = value;
     const output = meter.nextElementSibling;
-    const text = active ? `${value}%` : "—";
+    const pan = (value - 50) * 2;
+    const text = !active ? "—" : name !== "pan" ? `${value}%`
+      : pan === 0 ? "Center" : `${Math.abs(pan)}% ${pan < 0 ? "L" : "R"}`;
     if (output.textContent !== text) output.textContent = text;
+  }
+}
+
+function renderAccompaniment(voices) {
+  const playing = state.scan.playing || (!state.regionPreview && state.musicTimeline.running);
+  const available = state.mode === "scan" ? state.scan.accompaniment.filter(item => item.bars.length)
+    : state.backingDrum ? [state.backingDrum] : [];
+  const ids = playing ? voices.filter(voice => voice.accompaniment).map(voice => voice.regionId)
+    : available.map(item => item.region.id);
+  const parts = ids.join(",");
+  const previewId = state.regionPreview?.region.id;
+  const disabled = playing || Boolean(state.scan.startRequest);
+  const display = `${parts}|${playing}|${disabled}|${previewId ?? ""}`;
+  if (accompanimentList.dataset.display === display) return;
+  accompanimentList.dataset.display = display;
+  if (accompanimentList.dataset.parts !== parts) {
+    accompanimentList.dataset.parts = parts;
+    accompanimentList.replaceChildren(...ids.map(id => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.className = "region-chip";
+      button.type = "button";
+      button.dataset.accompaniment = id;
+      button.title = "Preview loop while paused";
+      const name = document.createElement("strong");
+      name.textContent = findMusicSource(id).instrument.label;
+      button.append(name);
+      button.addEventListener("click", () => {
+        const region = findMusicSource(id);
+        if (region) void previewRegion(region);
+      });
+      item.append(button);
+      return item;
+    }));
+    accompanimentList.hidden = !ids.length;
+    accompanimentEmpty.hidden = Boolean(ids.length);
+  }
+  for (const { firstElementChild: button } of accompanimentList.children) {
+    const active = playing || button.dataset.accompaniment === previewId;
+    button.disabled = disabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   }
 }
 
@@ -2409,11 +2780,17 @@ function performanceFrame(now = performance.now()) {
   const y = preview?.centroidY ?? (scanning ? (state.scan.regions[0]?.centroidY ?? .5) : state.pointer.ny);
   const speed = preview ? 0 : scanning ? (state.scan.playing ? 1 / state.scan.duration : 0) : state.pointer.speed;
   const edge = !preview && !scanning && region ? edgeProximity(region, state.pointer.nx, state.pointer.ny) : 0;
-  const scanRegions = scanMusicRegions(now);
-  const beat = musicBeatPosition(scanning, now);
-  const activeVoices = activeMusicVoices(scanning, region, scanRegions, pointerVisual, beat);
-  const scheduled = scheduleMusicEvents(activeVoices, beat, now);
-  return { x, y, speed, edge, preview, scanning, scanRegions, activeVoices, ...scheduled };
+  const beat = musicBeatPosition(scanning);
+  const runningScan = COMPOSITION && !preview && scanning && state.scan.playing;
+  const accompaniment = runningScan ? scanAccompanimentAt(beat) : [];
+  const scanRegions = runningScan ? [...scanMusicRegions(now), ...scanAccompanimentForScheduling(beat)]
+    : scanMusicRegions(now);
+  const voiceControls = activeMusicVoices(scanning, region, scanRegions, pointerVisual, beat);
+  const audible = new Set(accompaniment.map(item => item.region.id));
+  const activeVoices = runningScan ? voiceControls.filter(voice => !voice.accompaniment || audible.has(voice.regionId))
+    : voiceControls;
+  const scheduled = scheduleMusicEvents(voiceControls, beat, now);
+  return { x, y, speed, edge, preview, scanning, scanRegions, activeVoices, voiceControls, ...scheduled };
 }
 
 function updatePerformance(force = false) {
@@ -2422,11 +2799,6 @@ function updatePerformance(force = false) {
   state.lastPerformanceAt = now;
   if (usesPointerPlayback() && !state.regionPreview) updatePointerPlayback(now);
   const frame = performanceFrame(now);
-  updateActiveRegionSource();
-  $("#xValue").textContent = frame.x.toFixed(3);
-  $("#yValue").textContent = frame.y.toFixed(3);
-  $("#speedValue").textContent = frame.speed.toFixed(2);
-  $("#edgeValue").textContent = frame.edge.toFixed(2);
   if (frame.preview || frame.scanning) {
     soundEngine.updateScan(
       frame.preview ? [frame.preview] : frame.scanRegions,
@@ -2435,11 +2807,18 @@ function updatePerformance(force = false) {
       state.scan.playing,
       frame.scheduledEvents,
       frame.transportId,
-      frame.activeVoices,
+      frame.voiceControls,
+      frame.musicBars,
     );
   } else {
     soundEngine.updatePointer(frame);
   }
+  renderAccompaniment(frame.activeVoices);
+  updateActiveRegionSource();
+  $("#xValue").textContent = frame.x.toFixed(3);
+  $("#yValue").textContent = frame.y.toFixed(3);
+  $("#speedValue").textContent = frame.speed.toFixed(2);
+  $("#edgeValue").textContent = frame.edge.toFixed(2);
   renderAutomaticControls(frame.activeVoices, now, force);
 }
 
@@ -2479,15 +2858,18 @@ class SoundEngine {
     this.audioEpochMs = null;
     this.transportId = null;
     this.fmNode = null;
+    this.multitrackGates = null;
+    this.multitrackModule = null;
     this.setupPromise = null;
+    this.effectTargets = new WeakMap();
   }
   setOutputLevel(value) {
     this.outputLevel = Math.max(0, Math.min(1, value));
-    // A full slider now reaches 3× the previous master level. The compressor
-    // below catches brief peaks from overlapping region and edge sounds.
-    const gain = this.outputLevel * 3;
-    if (this.masterGain && this.context) {
-      this.masterGain.gain.setTargetAtTime(gain, this.context.currentTime, .025);
+    // Adjust listening volume after compression to preserve the mix dynamics.
+    const gain = this.outputLevel * MASTER_OUTPUT_GAIN;
+    if (this.context) {
+      this.masterGain?.gain.setTargetAtTime(gain, this.context.currentTime, .025);
+      this.multitrackGates?.master.gain.setTargetAtTime(gain, this.context.currentTime, .025);
     }
   }
   async setEnabled(enabled) {
@@ -2525,11 +2907,18 @@ class SoundEngine {
     }
   }
   syncAudioClock() {
-    this.audioEpochMs = (performance.timeOrigin ?? (Date.now() - performance.now()))
-      + performance.now() - this.context.currentTime * 1000;
+    if (!COMPOSITION || this.audioEpochMs === null) {
+      this.audioEpochMs = performance.timeOrigin + performance.now() - this.context.currentTime * 1000;
+    }
     if (state.mode === "scan" && state.scan.playing) {
       this.setScanEnvelope((musicBeatPosition(true) - state.scan.beatOffset) * this.beatSeconds(), true);
     }
+  }
+  musicTime() {
+    // Note scheduling and the scan must advance together if audio runs late.
+    return COMPOSITION && this.audioEpochMs !== null
+      ? this.audioEpochMs - performance.timeOrigin + this.context.currentTime * 1000
+      : performance.now();
   }
   applyEnabled(enabled) {
     if (this.enabled === enabled) return this.enabled;
@@ -2552,8 +2941,11 @@ class SoundEngine {
     this.setupPromise = this.setupAudioGraph().catch((error) => {
       const context = this.context;
       this.context = null;
+      this.audioEpochMs = null;
       this.fmNode = null;
       this.masterGain = null;
+      this.multitrackGates = null;
+      this.multitrackModule = null;
       if (context && context.state !== "closed") {
         void context.close().catch(() => {});
       }
@@ -2565,7 +2957,7 @@ class SoundEngine {
   }
   async setupAudioGraph() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    const context = this.context = new AudioContextClass();
+    const context = this.context = new AudioContextClass({ latencyHint: "balanced" });
     context.addEventListener("statechange", () => {
       if (this.context === context && this.enabled && context.state === "running") this.syncAudioClock();
     });
@@ -2579,7 +2971,7 @@ class SoundEngine {
     this.gain.gain.value = 0;
     this.panner = this.context.createStereoPanner();
     this.masterGain = this.context.createGain();
-    this.masterGain.gain.value = this.outputLevel * 3;
+    this.masterGain.gain.value = this.outputLevel * MASTER_OUTPUT_GAIN;
     this.compressor = this.context.createDynamicsCompressor();
     this.compressor.threshold.value = -12;
     this.compressor.knee.value = 10;
@@ -2604,18 +2996,21 @@ class SoundEngine {
     wetFilter.type = "highpass";
     wetFilter.frequency.value = 190;
     await withAudioTimeout(
-      context.audioWorklet.addModule("/static/fm-worklet.js?v=performance-mix1"),
+      context.audioWorklet.addModule("/static/fm-worklet.js?v=scan-turnaround1"),
       2000,
       "The browser sound engine did not load in time",
     );
+    const stemRoles = COMPOSITION ? INSTRUMENT_ROLES.map(({ id }) => id) : [];
+    const outputCount = COMPOSITION ? 4 + stemRoles.length : 1;
     this.fmNode = new AudioWorkletNode(this.context, "street-art-fm", {
       numberOfInputs: 0,
-      numberOfOutputs: COMPOSITION ? 4 : 1,
-      outputChannelCount: COMPOSITION ? [2, 2, 2, 2] : [2],
+      numberOfOutputs: outputCount,
+      outputChannelCount: Array(outputCount).fill(2),
+      processorOptions: { stemRoles },
     });
-    this.syncInstrumentPatches();
+    this.syncPerformancePatches();
     this.fmNode.connect(this.musicBus);
-    this.musicBus.connect(this.masterGain);
+    this.musicBus.connect(this.compressor);
     const connectEffect = (input, sendOutput) => {
       if (COMPOSITION) this.fmNode.connect(input, sendOutput);
       else this.musicBus.connect(input);
@@ -2652,7 +3047,7 @@ class SoundEngine {
     const wetDamping = this.wetDamping = this.context.createBiquadFilter();
     wetDamping.type = "lowpass";
     wetDamping.frequency.value = 6800;
-    wetFilter.connect(wetDamping).connect(this.masterGain);
+    wetFilter.connect(wetDamping).connect(this.compressor);
     // True stereo chorus: two short, independently modulated delay lines.
     // High-passing the wet input protects the mono kick and bass foundation.
     const chorusFilter = this.context.createBiquadFilter();
@@ -2661,7 +3056,7 @@ class SoundEngine {
     connectEffect(chorusFilter, 3);
     this.chorusWet = this.context.createGain();
     this.chorusWet.gain.value = .035;
-    this.chorusWet.connect(this.masterGain);
+    this.chorusWet.connect(this.compressor);
     this.chorusDepths = [];
     for (const [index, rate] of [.23, .31].entries()) {
       const line = this.context.createDelay(.08);
@@ -2680,7 +3075,59 @@ class SoundEngine {
     this.scanGate = this.context.createGain();
     this.pointerGate = this.context.createGain();
     this.pointerGate.gain.value = usesPointerPlayback() ? 0 : 1;
-    this.masterGain.connect(this.compressor).connect(this.scanGate).connect(this.pointerGate).connect(this.context.destination);
+    this.compressor.connect(this.masterGain).connect(this.scanGate).connect(this.pointerGate)
+      .connect(context.destination);
+    if (COMPOSITION) {
+      const master = context.createGain();
+      const scan = context.createGain();
+      const pointer = context.createGain();
+      master.gain.value = this.masterGain.gain.value;
+      pointer.gain.value = this.pointerGate.gain.value;
+      const source = context.createConstantSource();
+      source.connect(master).connect(scan).connect(pointer);
+      source.start();
+      this.multitrackGates = { master, scan, pointer };
+    }
+  }
+  async captureMultitrack(onBlock) {
+    const context = this.context;
+    if (!this.multitrackModule) {
+      this.multitrackModule = context.audioWorklet.addModule("/static/multitrack-capture.js?v=multitrack1")
+        .catch(error => {
+          this.multitrackModule = null;
+          throw error;
+        });
+    }
+    await this.multitrackModule;
+    const roles = INSTRUMENT_ROLES.length;
+    const pairs = roles + 2;
+    const capture = new AudioWorkletNode(context, "multitrack-capture", {
+      numberOfInputs: pairs + 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 2,
+      channelCountMode: "explicit",
+      channelInterpretation: "discrete",
+      processorOptions: { pairs },
+    });
+    capture.port.onmessage = event => onBlock(event.data);
+    for (let index = 0; index < roles; index++) this.fmNode.connect(capture, index + 4, index);
+    this.wetDamping.connect(capture, 0, roles);
+    this.chorusWet.connect(capture, 0, roles);
+    this.pointerGate.connect(capture, 0, roles + 1);
+    this.multitrackGates.pointer.connect(capture, 0, pairs);
+    // The capture node writes silence to its own output while the normal monitor keeps playing.
+    capture.connect(context.destination);
+    this.fmNode.port.postMessage({ type: "stems", enabled: true });
+    return () => {
+      capture.port.onmessage = null;
+      capture.port.close();
+      capture.disconnect();
+      this.fmNode.port.postMessage({ type: "stems", enabled: false });
+      for (const source of [this.fmNode, this.wetDamping, this.chorusWet, this.pointerGate, this.multitrackGates.pointer]) {
+        source.disconnect(capture);
+      }
+    };
   }
   beatSeconds() {
     return 60 / state.music.bpm;
@@ -2763,6 +3210,11 @@ class SoundEngine {
     }
     const average = name => this.effectMemory[name];
     const now = this.context.currentTime;
+    const updateEffect = (parameter, value, smoothing) => {
+      if (!parameter || this.effectTargets.get(parameter) === value) return;
+      this.effectTargets.set(parameter, value);
+      parameter.setTargetAtTime(value, now, smoothing);
+    };
     // Keep wet effects audible during the phrase and let them bloom in gaps.
     const activity = events.length
       ? Math.max(...events.map((event) => clampUnit(event.controls?.expression, event.mix ?? 1)))
@@ -2770,12 +3222,12 @@ class SoundEngine {
     const duck = 1 - activity * .18;
     const reverb = layered ? average("reverb") * .85 * duck : .04 + average("reverb") * .63 * duck;
     const delay = layered ? average("delay") * .80 * duck : .025 + average("delay") * .61 * duck;
-    this.reverbWet?.gain.setTargetAtTime(reverb, now, .16);
-    this.delayWet?.gain.setTargetAtTime(delay, now, .12);
-    this.chorusWet?.gain.setTargetAtTime(layered ? average("chorus") * .54 : .018 + average("chorus") * .32, now, .18);
-    if (layered) this.wetDamping?.frequency.setTargetAtTime(800 + 10200 * average("effectTone"), now, .18);
+    updateEffect(this.reverbWet?.gain, reverb, .16);
+    updateEffect(this.delayWet?.gain, delay, .12);
+    updateEffect(this.chorusWet?.gain, layered ? average("chorus") * .54 : .018 + average("chorus") * .32, .18);
+    if (layered) updateEffect(this.wetDamping?.frequency, 800 + 10200 * average("effectTone"), .18);
     for (const depth of this.chorusDepths) {
-      depth.gain.setTargetAtTime(layered ? .008 * average("chorusDepth") : .0007 + average("chorus") * .005 + average("movement") * .0015, now, .22);
+      updateEffect(depth.gain, layered ? .008 * average("chorusDepth") : .0007 + average("chorus") * .005 + average("movement") * .0015, .22);
     }
     const delaySeconds = COMPOSITION ? this.beatSeconds() * .5
       : Math.max(.12, Math.min(1.15, this.beatSeconds() * currentArrangement().fx.delayBeats));
@@ -2785,15 +3237,20 @@ class SoundEngine {
       this.lastDelaySeconds = delaySeconds;
     }
     const feedback = layered ? average("feedback") * .68 : .15 + average("delay") * .42;
-    this.delayFeedback?.gain.setTargetAtTime(feedback, now, .08);
-    this.rightDelayFeedback?.gain.setTargetAtTime(feedback, now, .08);
+    updateEffect(this.delayFeedback?.gain, feedback, .08);
+    updateEffect(this.rightDelayFeedback?.gain, feedback, .08);
   }
   syncInstrumentPatches(role = null) {
     if (!this.fmNode) return;
     const roles = role ? [role] : Object.keys(FM_SOUND);
     for (const id of roles) {
-      this.fmNode.port.postMessage({ type: "instrument-patch", role: id, values: FM_SOUND[id].patch });
+      this.fmNode.port.postMessage({ type: "instrument-patch", role: id, values: FM_SOUND[id].patch,
+        keepDefaults: Boolean(state.fmTakes) });
     }
+  }
+  syncPerformancePatches() {
+    this.fmNode?.port.postMessage({ type: "performance-patches", takes: STUDIO?.fmBank.fmTakePatches(state.fmTakes, STUDIO.fmGains) });
+    this.syncInstrumentPatches();
   }
   applyVoiceFrame(events) {
     this.fmNode?.port.postMessage({
@@ -2801,18 +3258,25 @@ class SoundEngine {
       regions: events.map(event => ({id:event.regionId, controls:event.controls})),
     });
   }
-  updatePointer({ activeVoices, scheduledEvents, x, speed, transportId }) {
+  updatePointer({ activeVoices, scheduledEvents, x, speed, transportId, musicBars }) {
     if (!this.enabled) return;
     this.syncFMMixes(pointerMusicLayers());
     this.applyControlFrame(activeVoices);
     this.applyVoiceFrame(activeVoices);
-    this.playSharedEvents(scheduledEvents, x, speed, transportId);
+    this.playSharedEvents(scheduledEvents, x, speed, transportId, musicBars);
   }
-  playSharedEvents(events, nx, speed, transportId = null) {
+  playSharedEvents(events, nx, speed, transportId = null, musicBars = []) {
     if (transportId !== this.transportId) {
       this.transportId = transportId;
       this.lastVoiceEvents.clear();
       this.fmNode?.port.postMessage({ type: "cancel" });
+    }
+    if (this.audioEpochMs != null) {
+      for (const bar of musicBars) this.fmNode?.port.postMessage({
+        type: "music-bar", time: (bar.scheduledAtMs - this.audioEpochMs) / 1000,
+        reverse: bar.reverse, turnaround: bar.turnaround, gazeTake: bar.gazeTake,
+        chordDegree: bar.chordDegree, accompaniment: bar.accompaniment,
+      });
     }
     const activeRegionIds = new Set();
     for (const event of events) {
@@ -2843,12 +3307,20 @@ class SoundEngine {
         role,
         note,
         onsetBeat: event.onsetBeat,
+        reverseTake: event.reverseTake,
+        ...(event.turnaroundBass && { turnaroundBass: true }),
+        chordDegree: event.harmony?.degree,
+        accompaniment: event.accompaniment === true,
+        leadLegato: Boolean(COMPOSITION && role === "lead_synth"),
+        legatoToBeat: event.legatoToBeat,
         duration: event.noteDurations?.[note] != null ? event.noteDurations[note] * this.beatSeconds() : duration,
         velocity: event.noteVelocities
           ? Math.max(.08, Math.min(1, event.noteVelocities[note] / 127)) * (COMPOSITION ? chordScale : 1)
           : velocity * chordScale,
         regionId: region.id,
-        pan: Math.max(-.9, Math.min(.9, pan + (index - (event.notes.length - 1) / 2) * .09)),
+        ...(COMPOSITION ? { pan: artworkPan(role, note), fixedPan: true } : {
+          pan: Math.max(-.9, Math.min(.9, pan + (index - (event.notes.length - 1) / 2) * .09)),
+        }),
         speed: Math.max(0, Math.min(1, speed)),
         kind: event.eventKind || "note",
         accent: event.accent,
@@ -2978,14 +3450,12 @@ class SoundEngine {
     this.regionMixBuses.set(region.id, gain);
     return gain;
   }
-  updateScan(regions, nx, seconds, playing = true, events = [], transportId = null, activeVoices = []) {
+  updateScan(regions, nx, seconds, playing = true, events = [], transportId = null, activeVoices = [], musicBars = []) {
     if (!this.enabled || !this.context) return;
     this.syncFMMixes(regions);
     this.applyControlFrame(activeVoices);
     this.applyVoiceFrame(activeVoices);
-    // Both outputs use the timestamped events in the WebSocket frame.
-    // UI refreshes update region mixes without deciding note-on timing.
-    this.playSharedEvents(events, nx, state.scan.playing ? 1 / Math.max(1, state.scan.duration) : 0, transportId);
+    this.playSharedEvents(events, nx, state.scan.playing ? 1 / Math.max(1, state.scan.duration) : 0, transportId, musicBars);
     if (!playing && regions[0] && performance.now() - this.lastSeekAccent > 90) {
       this.lastSeekAccent = performance.now();
     }
@@ -3096,7 +3566,10 @@ class SoundEngine {
   setScanEnvelope(seconds = null, smooth = false) {
     if (!this.scanGate || !this.context) return;
     const now = this.context.currentTime;
-    const gain = this.scanGate.gain;
+    this.applyScanEnvelope(this.scanGate.gain, now, seconds, smooth);
+    if (this.multitrackGates) this.applyScanEnvelope(this.multitrackGates.scan.gain, now, seconds, smooth);
+  }
+  applyScanEnvelope(gain, now, seconds, smooth) {
     const currentLevel = gain.value;
     gain.cancelScheduledValues(now);
     if (seconds === null) {
@@ -3129,14 +3602,17 @@ class SoundEngine {
   setPointerEnvelope(level, seconds = 0, restart = false) {
     if (!this.pointerGate || !this.context) return;
     const now = this.context.currentTime;
-    const gain = this.pointerGate.gain;
-    const current = gain.value;
-    gain.cancelScheduledValues(now);
-    gain.setValueAtTime(seconds ? current : level, now);
-    if (seconds) {
-      const dip = restart && current > 0 ? .025 : 0;
-      if (dip) gain.linearRampToValueAtTime(0, now + dip);
-      gain.linearRampToValueAtTime(level, now + dip + seconds);
+    for (const gate of [this.pointerGate, this.multitrackGates?.pointer]) {
+      if (!gate) continue;
+      const gain = gate.gain;
+      const current = gain.value;
+      gain.cancelScheduledValues(now);
+      gain.setValueAtTime(seconds ? current : level, now);
+      if (seconds) {
+        const dip = restart && current > 0 ? .025 : 0;
+        if (dip) gain.linearRampToValueAtTime(0, now + dip);
+        gain.linearRampToValueAtTime(level, now + dip + seconds);
+      }
     }
   }
   stopScan() {
@@ -3223,6 +3699,11 @@ class SoundEngine {
   }
 }
 const soundEngine = new SoundEngine();
+if (COMPOSITION && STUDIO?.multitrack) {
+  STUDIO.multitrack.bindMultitrackOutput(
+    $("#multitrackOutput"), INSTRUMENT_ROLES.map(role => role.label), ensurePerformanceSound, soundEngine,
+  );
+}
 
 function formatTime(seconds) {
   const value = Math.max(0, Math.round(seconds));
@@ -3293,7 +3774,11 @@ function setScanPath(mode) {
 function setScanRangeEditing(editing) {
   if (!STUDIO) return;
   state.scan.editingRanges = editing;
-  if (editing && state.link.enabled) setLinkedRegion(null);
+  if (editing && state.link.enabled) {
+    setLinkedRegion(null);
+    state.link.gazeSamples.length = 0;
+    resetEyeRegionStability();
+  }
   if (!editing) cancelScanRange();
   if (editing && !(COMPOSITION && state.scan.playing)) {
     if (state.scan.pathMode !== "custom") setScanPath("custom");
@@ -3424,16 +3909,15 @@ function queueLiveScanRange(range) {
     showToast("This scan already has the maximum number of live ranges.");
     return;
   }
-  const seconds = startedFrom + (performance.now() - startedAt) / 1000;
+  const seconds = startedFrom + (soundEngine.musicTime() - startedAt) / 1000;
   const barsPerSecond = state.music.bpm / 240;
-  // The scheduler can already have queued notes 35 ms ahead of the playhead.
-  const nextBar = Math.floor((seconds + .05) * barsPerSecond) + 1;
+  const nextBar = Math.floor((seconds + MUSIC_CHANGE_GUARD_MS / 1000) * barsPerSecond) + 1;
   const updated = STUDIO.scan.insertScanRange(route, range, nextBar, duration * barsPerSecond);
   if (!updated) {
     showToast("Too few whole bars remain to add this range.");
     return;
   }
-  setScanRoute(updated);
+  setScanRoute(updated, nextBar);
   renderScanRanges();
   setScanPosition(seconds, true);
   showToast(range.from < range.to ? "Left-to-right range queued." : "Right-to-left range queued.");
@@ -3463,7 +3947,7 @@ function setScanDuration(value, announce = true) {
   }
   if (state.mode === "scan") updateScanInstruction();
   if (state.scan.playing) {
-    state.scan.startedAt = performance.now();
+    state.scan.startedAt = soundEngine.musicTime();
     state.scan.startedFrom = state.scan.seconds;
     soundEngine.setScanEnvelope(state.scan.seconds, true);
   }
@@ -3528,7 +4012,7 @@ function scanFrame(now) {
     return;
   }
   state.scan.lastFrameAt = now;
-  const elapsed = (now - state.scan.startedAt) / 1000;
+  const elapsed = (soundEngine.musicTime() - state.scan.startedAt) / 1000;
   const seconds = state.scan.startedFrom + elapsed;
   if (seconds >= state.scan.duration) {
     setScanPosition(state.scan.duration, true);
@@ -3555,20 +4039,24 @@ async function playScan() {
     updateScanControls();
     return;
   }
-  let scanStart = performance.now();
+  let scanStart = soundEngine.musicTime();
   let takeoverBeat = null;
   if (COMPOSITION && state.link.enabled && state.musicTimeline.running) {
     const barMs = 240000 / state.music.bpm;
     request.pointerAnchor = state.musicTimeline.startedAt;
-    request.takeoverBeat = 4 * (Math.floor((scanStart + 40 - request.pointerAnchor) / barMs) + 1);
+    request.takeoverBeat = 4 * (Math.floor((scanStart + MUSIC_CHANGE_GUARD_MS - request.pointerAnchor) / barMs) + 1);
     if (state.pointer.fadeEndsAt !== null) {
       state.pointer.fadeEndsAt = null;
       soundEngine.setPointerEnvelope(1, .08);
     }
     const boundary = request.pointerAnchor + request.takeoverBeat / 4 * barMs;
-    await new Promise(resolve => setTimeout(resolve, Math.max(0, boundary - performance.now())));
+    while (state.scan.startRequest === request && state.link.enabled && request.pointerAnchor === state.musicTimeline.startedAt) {
+      const remaining = boundary - soundEngine.musicTime();
+      if (remaining <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.max(4, Math.min(remaining, 100))));
+    }
     if (state.scan.startRequest !== request) return;
-    scanStart = performance.now();
+    scanStart = soundEngine.musicTime();
     if (state.link.enabled && request.pointerAnchor === state.musicTimeline.startedAt) {
       scanStart = boundary;
       takeoverBeat = request.takeoverBeat;
@@ -3589,6 +4077,7 @@ async function playScan() {
   const exploring = usesPointerPlayback();
   state.scan.playing = true;
   if (exploring) {
+    resetLinkedTake();
     state.link.region = state.activeRegion;
     resetPointerPlayback(true);
   }
@@ -3721,8 +4210,14 @@ function setLinkedMode(enabled) {
     }
     if (!state.scan.playing) soundEngine.setScanEnvelope();
   } else {
-    resetLinkedFocus();
-    if (!state.scan.playing) resetPointerPlayback(true);
+    if (state.scan.playing) {
+      setLinkedRegion(null);
+      link.focus.clear();
+      link.lastAt = 0;
+    } else {
+      resetLinkedFocus();
+      resetPointerPlayback(true);
+    }
     if (state.eye.active || state.eye.starting) stopEyeTracking(false);
   }
   pointerControls.hidden = !link.enabled && state.mode !== "pointer";
@@ -3776,7 +4271,8 @@ scanTimeline.addEventListener("input", async () => {
   const seconds = snapScanSeconds(Number(scanTimeline.value));
   await ensurePerformanceSound();
   if (state.scan.playing) {
-    state.scan.startedAt = performance.now();
+    resetLinkedTake();
+    state.scan.startedAt = soundEngine.musicTime();
     state.scan.startedFrom = seconds;
     soundEngine.setScanEnvelope(seconds, true);
   }
@@ -3825,8 +4321,11 @@ function updateActiveRegionSource() {
   const source = exploring ? state.pointer.source.toUpperCase() : state.link.enabled ? "LINK" : "SCAN";
   const playing = exploring ? state.musicTimeline.running : state.scan.playing;
   const bar = Math.floor(musicBeatPosition(!exploring) / 4);
-  const take = COMPOSITION && playing && !state.regionPreview ? (reverseAtBar(bar, !exploring) ? " · B ←" : " · A →") : "";
-  const label = `ACTIVE REGION · ${source}${take}`;
+  const reverse = COMPOSITION && playing && !state.regionPreview ? reverseAtBar(bar, !exploring) : null;
+  const take = reverse === null ? "" : reverse ? " · B ←" : " · A →";
+  const gazeTake = state.link.enabled && state.scan.playing ? linkedTakeAtBar(bar) : null;
+  const gaze = gazeTake && gazeTake.reverse !== reverse ? (gazeTake.reverse ? " · GAZE B ←" : " · GAZE A →") : "";
+  const label = `ACTIVE REGION · ${source}${take}${gaze}`;
   const element = $("#signalLabel");
   if (element.textContent !== label) element.textContent = label;
 }
@@ -3855,10 +4354,14 @@ function updateExplorePosition(nx, ny, source) {
       state.pointer.directionAnchor = nx;
       if (state.musicTimeline.running) {
         // Allow for the notes already queued just before the next downbeat.
-        const nextBar = Math.floor(musicBeatPosition(false, now + 40) / 4) + 1;
+        const nextBar = Math.floor(musicBeatPosition(false, soundEngine.musicTime() + MUSIC_CHANGE_GUARD_MS) / 4) + 1;
         state.musicTimeline.directionChanges.set(nextBar, nx < anchor);
       }
     }
+  } else if (COMPOSITION && source === "gaze") {
+    const samples = state.link.gazeSamples;
+    while (samples.length && now - samples[0].time > LINK_GAZE_MOTION_MS) samples.shift();
+    samples.push({ x: nx, time: now });
   }
   updateActiveRegionSource();
   const region = source === "gaze" ? regionAtGaze(nx, ny) : regionAt(nx, ny);
@@ -3887,7 +4390,7 @@ function updatePointerPlayback(now) {
     pointer.fadeEndsAt = null;
     timeline.directionChanges.clear();
     pointer.directionAnchor = pointer.nx;
-    timeline.startedAt = now;
+    timeline.startedAt = soundEngine.musicTime();
     timeline.running = true;
     pointer.lastMixAt = now;
     pointer.regions = state.regions.map(region => {
@@ -3947,7 +4450,13 @@ function updateGazeRegion(region, now = performance.now()) {
   }
   if (now - state.eye.candidateSince >= EYE_REGION_DWELL_MS) {
     if (exploring) activateRegion(region);
-    else setLinkedRegion(region);
+    else {
+      const samples = state.link.gazeSamples;
+      const motion = state.pointer.nx - (samples[0]?.x ?? state.pointer.nx);
+      const reverse = Math.abs(motion) >= POINTER_DIRECTION_DISTANCE ? motion < 0 : null;
+      setLinkedRegion(region, reverse);
+      samples.splice(0, samples.length, { x: state.pointer.nx, time: now });
+    }
     resetEyeRegionStability();
   }
 }
@@ -3972,7 +4481,9 @@ canvas.addEventListener("click", (event) => {
   if ((state.mode !== "pointer" && !state.link.enabled) || state.scan.editingRanges ||
       !state.eye.active || !state.eye.calibrated || !calibrationOverlay.hidden) return;
   if (!pointerPosition(event) || performance.now() - state.eye.lastResultAt >= EYE_RESULT_TIMEOUT_MS) return;
-  state.eye.tracker.recordScreenPosition(event.clientX, event.clientY, "click");
+  const { tracker, calibrations, calibrationLayout } = state.eye;
+  tracker.recordScreenPosition(event.clientX, event.clientY, "click");
+  calibrations[calibrationLayout] = tracker.getRegression()[0].getData().slice();
 });
 async function seekScanFromArtwork(x) {
   if (usesPointerPlayback() || state.scan.editingRanges) return;
@@ -3985,7 +4496,8 @@ async function seekScanFromArtwork(x) {
   if (usesPointerPlayback() || state.scan.editingRanges || state.scan.route !== route) return;
   const seconds = snapScanSeconds(progress * state.scan.duration);
   if (state.scan.playing) {
-    state.scan.startedAt = performance.now();
+    resetLinkedTake();
+    state.scan.startedAt = soundEngine.musicTime();
     state.scan.startedFrom = seconds;
     soundEngine.setScanEnvelope(seconds, true);
   }
@@ -4097,10 +4609,29 @@ function configureGazeTracker(tracker) {
 }
 
 function expandGazeClickMemory(regression) {
-  // The default holds 50 clicks. Keep all 60 calibration clicks plus corrections.
+  // Keep all 60 clicks for this layout, with space for corrections.
   for (const key of ["screenXClicksArray", "screenYClicksArray", "eyeFeaturesClicks", "dataClicks"]) {
     regression[key].windowSize = EYE_CLICK_MEMORY;
   }
+}
+
+function resetGazeRegression() {
+  const regression = state.eye.tracker.getRegression()[0];
+  regression.init();
+  expandGazeClickMemory(regression);
+  return regression;
+}
+
+function useGazeCalibration() {
+  const eye = state.eye;
+  if (!eye.ready || eye.calibration) return;
+  const layout = artworkIsFullscreen() ? "fullscreen" : "windowed";
+  if (eye.calibrationLayout === layout) return;
+  const samples = eye.calibrations?.[layout];
+  const regression = resetGazeRegression();
+  if (samples) regression.setData(samples);
+  eye.calibrationLayout = layout;
+  eye.calibrated = Boolean(samples);
 }
 
 function resetGazePosition() {
@@ -4110,6 +4641,7 @@ function resetGazePosition() {
   state.eye.lastResultAt = -Infinity;
   state.eye.outsideArtworkSince = null;
   gazeCursor.hidden = true;
+  state.link.gazeSamples.length = 0;
   resetEyeRegionStability();
 }
 
@@ -4149,6 +4681,7 @@ function gazeToArtwork(result) {
     updateExplorePosition(nx, ny, "gaze");
   } else if (!state.regionPreview) {
     state.eye.outsideArtworkSince ??= now;
+    state.link.gazeSamples.length = 0;
     state.eye.candidateRegionId = null;
     state.eye.candidateSince = 0;
     updatePerformance();
@@ -4205,6 +4738,7 @@ async function startEyeTracking() {
     eyeVideo.play().catch(() => {});
     state.eye.ready = true;
     state.eye.starting = false;
+    useGazeCalibration();
     eyeStatus.textContent = state.eye.calibrated ? "WebGazer · calibrated" : "WebGazer · ready to calibrate";
     updateEyeButtons();
     if (!state.eye.calibrated) startCalibration();
@@ -4237,13 +4771,16 @@ function releaseGazeTracker(tracker) {
 
 function stopEyeTracking(showMessage = true) {
   const wasTracking = state.eye.active;
+  const wasCalibrating = Boolean(state.eye.calibration);
   state.eye.sessionId++;
-  if (!calibrationOverlay.hidden) restorePreviousGazeCalibration();
+  if (wasCalibrating) closeCalibration(true);
   if (!state.eye.startupPending) releaseGazeTracker(state.eye.tracker);
   state.eye.tracker = null;
   state.eye.active = false;
   state.eye.starting = false;
   state.eye.ready = false;
+  state.eye.calibrated = false;
+  state.eye.calibrationLayout = null;
   resetGazePosition();
   state.pointer.source = "mouse";
   calibrationOverlay.hidden = true;
@@ -4251,6 +4788,7 @@ function stopEyeTracking(showMessage = true) {
   eyeStatus.textContent = "Mouse active · camera off";
   updateActiveRegionSource();
   updateEyeButtons();
+  if (wasCalibrating && artworkIsFullscreen()) void toggleArtworkFullscreen();
   if (!usesPointerPlayback()) {
     if (state.link.enabled) setLinkedRegion(null);
     if (showMessage) statusText.textContent = "Mouse exploration is active.";
@@ -4316,30 +4854,43 @@ function median(values) {
 }
 
 function showCalibrationPoint(message = "") {
-  const { screenX, screenY } = state.eye.calibrationTargets[state.eye.calibrationIndex];
+  const { targets, index, clicks } = state.eye.calibration;
+  const { screenX, screenY } = targets[index];
   const overlay = calibrationOverlay.getBoundingClientRect();
   calibrationTarget.style.left = `${screenX - overlay.left}px`;
   calibrationTarget.style.top = `${screenY - overlay.top}px`;
   calibrationProgress.textContent =
-    `Point ${state.eye.calibrationIndex + 1} of ${state.eye.calibrationTargets.length} · ${state.eye.calibrationClicks} / ${EYE_CALIBRATION_CLICKS} clicks${message}`;
-  calibrationTarget.querySelector("span").textContent = `${state.eye.calibrationClicks} / ${EYE_CALIBRATION_CLICKS}`;
+    `Point ${index + 1} of ${targets.length} · ${clicks} / ${EYE_CALIBRATION_CLICKS} clicks${message}`;
+  calibrationTarget.querySelector("span").textContent = `${clicks} / ${EYE_CALIBRATION_CLICKS}`;
 }
 
 function refreshCalibrationLayout() {
-  if (calibrationOverlay.hidden) return;
-  state.eye.calibrationTargets = buildCalibrationTargets();
+  const calibration = state.eye.calibration;
+  if (!calibration?.targets) return;
+  calibration.targets = buildCalibrationTargets();
   showCalibrationPoint();
 }
 
+function beginCalibrationStage(layout) {
+  const calibration = state.eye.calibration;
+  clearTimeout(calibration.fullscreenTimer);
+  calibration.stage = layout;
+  calibration.index = 0;
+  calibration.clicks = 0;
+  calibration.targets = buildCalibrationTargets();
+  resetGazeRegression();
+  calibrationStep.textContent = layout === "windowed" ? "1 of 2 · Windowed" : "2 of 2 · Fullscreen";
+  calibrationTarget.hidden = false;
+  showCalibrationPoint();
+  calibrationTarget.focus({ preventScroll: true });
+}
+
 function startCalibration() {
-  if (!state.eye.ready || !state.eye.active || !calibrationOverlay.hidden) return;
-  const regression = state.eye.tracker.getRegression()[0];
-  state.eye.previousCalibration = state.eye.calibrated ? regression.getData().slice() : null;
-  regression.init();
-  expandGazeClickMemory(regression);
-  state.eye.calibrated = false;
-  state.eye.calibrationIndex = 0;
-  state.eye.calibrationClicks = 0;
+  const eye = state.eye;
+  if (!eye.ready || !eye.active || eye.calibration) return;
+  eye.calibration = {};
+  eye.calibrated = false;
+  eye.calibrationLayout = null;
   resetGazePosition();
   if (!state.regionPreview) {
     if (usesPointerPlayback()) {
@@ -4348,28 +4899,70 @@ function startCalibration() {
     } else setLinkedRegion(null);
   }
   calibrationOverlay.hidden = false;
-  refreshCalibrationLayout();
+  if (artworkIsFullscreen()) {
+    canvasShell.append(calibrationOverlay);
+    eye.calibration.stage = "leaving-fullscreen";
+    calibrationStep.textContent = "1 of 2 · Opening windowed view";
+    calibrationProgress.textContent = "";
+    calibrationTarget.hidden = true;
+    void toggleArtworkFullscreen();
+  } else beginCalibrationStage("windowed");
 }
 
-function restorePreviousGazeCalibration() {
-  const regression = state.eye.tracker.getRegression()[0];
-  regression.init();
-  expandGazeClickMemory(regression);
-  if (state.eye.previousCalibration) regression.setData(state.eye.previousCalibration);
-  state.eye.calibrated = Boolean(state.eye.previousCalibration);
-  state.eye.previousCalibration = null;
+function closeCalibration(cancelled = false) {
+  const calibration = state.eye.calibration;
+  clearTimeout(calibration.fullscreenTimer);
+  calibration.cancelled = cancelled;
+  state.eye.calibration = null;
   calibrationOverlay.hidden = true;
+  if (calibrationOverlay.parentElement !== document.body) document.body.append(calibrationOverlay);
   resetGazePosition();
 }
 
-function finishCalibration() {
-  state.eye.calibrated = true;
-  state.eye.previousCalibration = null;
-  calibrationOverlay.hidden = true;
-  resetGazePosition();
-  eyeStatus.textContent = "WebGazer · calibrated";
-  statusText.textContent = "Look across the artwork. Look at a spot and click it to correct the gaze cursor.";
-  showToast("Eye calibration complete");
+function cancelCalibration() {
+  if (!state.eye.calibration) return;
+  closeCalibration(true);
+  if (state.eye.calibrations) {
+    useGazeCalibration();
+    eyeStatus.textContent = "WebGazer · both views calibrated";
+  } else stopEyeTracking();
+  if (artworkIsFullscreen()) void toggleArtworkFullscreen();
+}
+
+async function advanceCalibration(samples) {
+  const eye = state.eye;
+  const calibration = eye.calibration;
+  if (calibration.stage === "fullscreen") {
+    eye.calibrations = { windowed: calibration.windowed, fullscreen: samples };
+    closeCalibration();
+    eye.calibrationLayout = "fullscreen";
+    eye.calibrated = true;
+    eyeStatus.textContent = "WebGazer · both views calibrated";
+    statusText.textContent = "Look across the artwork. Look at a spot and click it to correct the gaze cursor.";
+    showToast("Eye calibration complete · both views ready");
+    return;
+  }
+
+  calibration.windowed = samples;
+  calibration.stage = "opening-fullscreen";
+  calibration.targets = null;
+  calibrationTarget.hidden = true;
+  calibrationStep.textContent = "2 of 2 · Opening fullscreen";
+  calibrationProgress.textContent = "";
+  const stillOpening = () => eye.calibration === calibration && calibration.stage === "opening-fullscreen";
+  // Older fullscreen APIs can return before the fullscreenchange event.
+  calibration.fullscreenTimer = window.setTimeout(() => {
+    if (!stillOpening()) return;
+    if (artworkIsFullscreen()) syncFullscreenState();
+    else enterFullscreenFallback();
+  }, 1800);
+  try {
+    await enterArtworkFullscreen();
+    if (stillOpening() && artworkIsFullscreen()) syncFullscreenState();
+    if (calibration.cancelled && !eye.calibration && artworkIsFullscreen()) void toggleArtworkFullscreen();
+  } catch (_) {
+    if (stillOpening()) enterFullscreenFallback();
+  }
 }
 
 mouseSource.addEventListener("click", () => stopEyeTracking());
@@ -4378,27 +4971,25 @@ eyeToggle.addEventListener("click", () => {
   else startEyeTracking();
 });
 eyeCalibrate.addEventListener("click", startCalibration);
-calibrationCancel.addEventListener("click", () => {
-  restorePreviousGazeCalibration();
-  if (!state.eye.calibrated) stopEyeTracking();
-});
+calibrationCancel.addEventListener("click", cancelCalibration);
 calibrationTarget.addEventListener("click", () => {
-  if (calibrationOverlay.hidden || !state.eye.ready) return;
+  const calibration = state.eye.calibration;
+  if (!calibration?.targets || !state.eye.ready) return;
   const tracker = state.eye.tracker;
   const regression = tracker.getRegression()[0];
   const count = regression.getData().length;
-  const { screenX, screenY } = state.eye.calibrationTargets[state.eye.calibrationIndex];
+  const { screenX, screenY } = calibration.targets[calibration.index];
   tracker.recordScreenPosition(screenX, screenY, "click");
   if (regression.getData().length === count) {
     showCalibrationPoint(" · Face not detected. Look at the target and try again.");
     return;
   }
-  state.eye.calibrationClicks++;
-  if (state.eye.calibrationClicks === EYE_CALIBRATION_CLICKS) {
-    state.eye.calibrationIndex++;
-    state.eye.calibrationClicks = 0;
+  calibration.clicks++;
+  if (calibration.clicks === EYE_CALIBRATION_CLICKS) {
+    calibration.index++;
+    calibration.clicks = 0;
   }
-  if (state.eye.calibrationIndex === state.eye.calibrationTargets.length) finishCalibration();
+  if (calibration.index === calibration.targets.length) void advanceCalibration(regression.getData().slice());
   else showCalibrationPoint();
 });
 
@@ -4630,7 +5221,7 @@ volumeSlider.addEventListener("input", (event) => {
   }
 });
 
-function applyMusicSettings(announce = true) {
+function applyMusicSettings(announce = true, newArtwork = false) {
   const bpm = Math.max(40, Math.min(200, Math.round(Number(musicBpm.value) || 72)));
   const root = NOTE_NAMES.includes(musicRoot.value) ? musicRoot.value : (COMPOSITION ? "C" : "D");
   const mode = MUSIC_MODES[musicMode.value] ? musicMode.value : (COMPOSITION ? "major" : "dorian");
@@ -4645,14 +5236,12 @@ function applyMusicSettings(announce = true) {
   }
   if (COMPOSITION && (tempoChanged || harmonyChanged) && (state.scan.playing || state.scan.startRequest)) pauseScan();
   state.music = { bpm, root, mode };
-  if (COMPOSITION && harmonyChanged) {
-    for (const region of state.regions) {
-      if (region.instrument.id === "lead_synth") applyArtworkInstrument(region, region.instrument);
-    }
-    rebuildReverseArrangement();
+  if (COMPOSITION && newArtwork) rebuildScanRoute();
+  if (COMPOSITION && (newArtwork || harmonyChanged)) {
+    rebuildArtworkArrangements();
     if (announce) updateRegionInstrumentControls();
   }
-  if (state.regionPreview?.item) state.regionPreview.startedAt = performance.now();
+  if (state.regionPreview?.item) state.regionPreview.startedAt = soundEngine.musicTime();
   if (COMPOSITION && tempoChanged) setScanDuration(state.scan.duration, false);
   musicBpm.value = String(bpm);
   musicRoot.value = root;
@@ -4723,6 +5312,8 @@ function artworkIsFullscreen() {
   return nativeFullscreenElement() === canvasShell || canvasShell.classList.contains("fullscreen-fallback");
 }
 
+let preferFullscreenFallback = false;
+
 function syncFullscreenState() {
   const active = artworkIsFullscreen();
   pointerFullscreen.setAttribute("aria-pressed", String(active));
@@ -4731,28 +5322,49 @@ function syncFullscreenState() {
   state.eye.smoothX = null;
   state.eye.smoothY = null;
   state.eye.rawHistory = [];
+  state.link.gazeSamples.length = 0;
   resetEyeRegionStability();
+  state.pointer.directionAnchor = null;
+  const toast = $("#toast");
+  const toastHost = active ? canvasShell : document.body;
+  if (toast.parentElement !== toastHost) toastHost.append(toast);
   drawCanvas();
+
+  const calibration = state.eye.calibration;
+  if (active && calibration?.stage === "opening-fullscreen") {
+    canvasShell.append(calibrationOverlay);
+    beginCalibrationStage("fullscreen");
+  } else if (!active && calibration?.stage === "leaving-fullscreen") {
+    document.body.append(calibrationOverlay);
+    beginCalibrationStage("windowed");
+  } else if (!active && calibration?.stage === "fullscreen") {
+    cancelCalibration();
+  } else useGazeCalibration();
+}
+
+function enterFullscreenFallback() {
+  preferFullscreenFallback = true;
+  canvasShell.classList.add("fullscreen-fallback");
+  document.body.classList.add("fullscreen-fallback-active");
+  syncFullscreenState();
+}
+
+async function enterArtworkFullscreen() {
+  const request = canvasShell.requestFullscreen || canvasShell.webkitRequestFullscreen;
+  if (request && !preferFullscreenFallback) await request.call(canvasShell);
+  else enterFullscreenFallback();
 }
 
 async function toggleArtworkFullscreen() {
-  if (artworkIsFullscreen()) {
-    if (nativeFullscreenElement()) {
+  try {
+    if (!artworkIsFullscreen()) {
+      await enterArtworkFullscreen();
+    } else if (nativeFullscreenElement()) {
       const exit = document.exitFullscreen || document.webkitExitFullscreen;
       if (exit) await exit.call(document);
     } else {
       canvasShell.classList.remove("fullscreen-fallback");
       document.body.classList.remove("fullscreen-fallback-active");
-      syncFullscreenState();
-    }
-    return;
-  }
-  try {
-    const request = canvasShell.requestFullscreen || canvasShell.webkitRequestFullscreen;
-    if (request) await request.call(canvasShell);
-    else {
-      canvasShell.classList.add("fullscreen-fallback");
-      document.body.classList.add("fullscreen-fallback-active");
       syncFullscreenState();
     }
   } catch (error) {
@@ -4785,8 +5397,13 @@ logicOverlay.addEventListener("click", (event) => {
   if (event.target === logicOverlay) setLogicVisible(false);
 });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !logicOverlay.hidden) setLogicVisible(false);
-  if (event.key === "Escape" && canvasShell.classList.contains("fullscreen-fallback")) toggleArtworkFullscreen();
+  if (event.key !== "Escape") return;
+  if (state.eye.calibration) {
+    cancelCalibration();
+    return;
+  }
+  if (!logicOverlay.hidden) setLogicVisible(false);
+  if (canvasShell.classList.contains("fullscreen-fallback")) void toggleArtworkFullscreen();
 });
 
 async function startOver() {
@@ -4803,9 +5420,17 @@ async function startOver() {
   state.artworkName = "";
   state.image = null;
   state.imagePixels = null;
+  state.scan.detailProfile = null;
+  state.scan.accompaniment = [];
+  state.scan.accompanimentBlocks = [];
   state.pointer.sampleCache = null;
   resetPointerPlayback(true);
   state.manifest = null;
+  state.fmTakes = null;
+  state.chordRhythmRole = null;
+  soundEngine.syncPerformancePatches();
+  if (COMPOSITION) loadFmVolumePreference();
+  refreshFmEditor();
   setScanRangeEditing(false);
   state.scan.ranges = [];
   if (STUDIO) setScanPath("forward");
@@ -4928,6 +5553,13 @@ for (const input of document.querySelectorAll("[data-effect-trim]")) {
 }
 function renderFmPatch(role) {
   const fields = $("#fmPatchFields");
+  const presetA = role !== "drums" && state.fmTakes?.A.find(preset => preset.role === role);
+  const presetB = role !== "drums" && state.fmTakes?.B.find(preset => preset.role === role);
+  $("#fmPatchSummary").textContent = role === "drums" && state.fmTakes?.A.some(preset => preset.role === "drums")
+    ? "Each drum piece uses its own A and B sounds. These kit controls apply to both."
+    : presetA && presetB
+      ? `A · ${presetA.name} / B · ${presetB.name}. Controls start from A. Edits apply to both on new notes.`
+      : "Patch changes apply to new notes.";
   fields.replaceChildren();
   for (const group of STUDIO.fm.fmGroups(role)) {
     const fieldset = document.createElement("fieldset");
@@ -4943,7 +5575,7 @@ function renderFmPatch(role) {
       input.min = control.min;
       input.max = control.max;
       input.step = control.step;
-      const initial = STUDIO.fm.fmDefaultValue(role, control);
+      const initial = presetA?.values[control.key] ?? STUDIO.fm.fmDefaultValue(role, control);
       input.value = FM_SOUND[role].patch[control.key] ?? initial;
       input.dataset.fmParameter = control.key;
       label.textContent = control.unit ? `${control.label} (${control.unit})` : control.label;
@@ -4953,7 +5585,7 @@ function renderFmPatch(role) {
       const apply = () => {
         if (!Number.isFinite(input.valueAsNumber)) return;
         const value = Math.min(control.max, Math.max(control.min, input.valueAsNumber));
-        if (value === initial) delete FM_SOUND[role].patch[control.key];
+        if (!state.fmTakes && value === initial) delete FM_SOUND[role].patch[control.key];
         else FM_SOUND[role].patch[control.key] = value;
         soundEngine.syncInstrumentPatches(role);
       };
@@ -4969,8 +5601,22 @@ function renderFmPatch(role) {
   }
 }
 
+function loadFmVolumePreference(raw = undefined) {
+  try {
+    const saved = JSON.parse(raw ?? localStorage.getItem(FM_VOLUME_STORAGE) ?? "{}");
+    for (const id of Object.keys(FM_SOUND)) {
+      const volume = saved?.[id] ?? (id === "organ" ? saved?.strings : undefined);
+      FM_SOUND[id].volume = Number.isFinite(volume) ? clampUnit(volume) : 1;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function setupFmEditor() {
   const buttons = $("#fmRoleButtons");
+  const effectsNote = $("#instrumentEffectsNote");
   const controls = [
     { input: $("#fmVolume"), output: $("#fmVolumeValue"), key: "volume" },
     { input: $("#fmTone"), output: $("#fmToneValue"), key: "tone" },
@@ -4982,18 +5628,16 @@ function setupFmEditor() {
   for (const control of controls) {
     control.refresh = addRotaryControl(control.input, control.output, "%");
   }
-  try {
-    const saved = JSON.parse(localStorage.getItem(FM_VOLUME_STORAGE) || "{}");
-    for (const id of Object.keys(FM_SOUND)) {
-      const volume = saved?.[id] ?? (id === "organ" ? saved?.strings : undefined);
-      if (Number.isFinite(volume)) FM_SOUND[id].volume = clampUnit(volume);
-    }
-  } catch (_) { /* Storage is optional. */ }
+  loadFmVolumePreference();
   let chosen = INSTRUMENT_ROLES[0].id;
   const refresh = () => {
     for (const button of buttons.children) button.setAttribute("aria-pressed", String(button.dataset.role === chosen));
+    effectsNote.hidden = chosen !== "drums" && chosen !== "bass";
+    effectsNote.textContent = chosen === "drums" ? "Kick bypasses Delay and Reverb."
+      : chosen === "bass" ? "Acid Bass bypasses Delay and Reverb." : "";
     for (const { input, refresh: refreshKnob, key, send } of controls) {
       const settings = send ? FM_SOUND[chosen].sends : FM_SOUND[chosen];
+      if (send) input.closest("label").hidden = chosen === "bass" && BASS_FIXED_SENDS.has(key);
       input.value = Math.round(settings[key] * 100);
       refreshKnob();
     }
@@ -5029,6 +5673,11 @@ function setupFmEditor() {
     soundEngine.syncInstrumentPatches(chosen);
     refresh();
   });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== FM_VOLUME_STORAGE || !loadFmVolumePreference(event.newValue ?? "{}")) return;
+    refresh();
+    updatePerformance(true);
+  });
   refresh();
   return refresh;
 }
@@ -5041,10 +5690,29 @@ function capturePresetSettings() {
     scan: { duration: state.scan.duration, pathMode: state.scan.pathMode, voiceMode: state.scan.voiceMode,
       ranges: state.scan.ranges.map(range => ({ ...range })) },
     instruments: structuredClone(FM_SOUND),
+    fmTakes: state.fmTakes,
+    chordRhythmRole: state.chordRhythmRole,
     regionInstruments: state.regions.map(region => ({ id: region.id, role: region.instrument.id })),
     masterVolume: Number(volumeSlider.value) / 100,
     effects: { ...state.effectTrims },
   };
+}
+
+function applyPresetRegionInstruments(savedAssignments) {
+  if (!Array.isArray(savedAssignments)) return;
+  const assignments = new Map(savedAssignments.map(item => [item?.id, instrumentIdForArtwork(item?.role)]));
+  for (const region of state.regions) {
+    // Older presets stored assignments for each detection. Prefer a saved
+    // manual choice, with the first detection breaking ties.
+    const manual = region.sourceDetections?.map(detection => {
+      const saved = assignments.get(detection.id);
+      const detectedRole = instrumentIdForArtwork(detection.default_instrument);
+      const defaultRole = INSTRUMENTS_BY_ID.has(detectedRole) ? detectedRole : region.defaultInstrumentId;
+      return saved !== defaultRole && INSTRUMENTS_BY_ID.has(saved) ? saved : null;
+    }).find(Boolean);
+    const role = INSTRUMENTS_BY_ID.get(manual ?? assignments.get(region.id));
+    if (role) applyArtworkInstrument(region, role);
+  }
 }
 
 function restorePresetSettings(settings) {
@@ -5054,25 +5722,6 @@ function restorePresetSettings(settings) {
   if (["major", "minor"].includes(music?.mode)) musicMode.value = music.mode;
   applyMusicSettings(false);
 
-  if (Array.isArray(settings.regionInstruments)) {
-    const assignments = new Map(settings.regionInstruments.map(item => [item?.id, instrumentIdForArtwork(item?.role)]));
-    for (const region of state.regions) {
-      // Older presets stored assignments for each detection. Prefer a saved
-      // manual choice, with the first detection breaking ties.
-      const manual = region.sourceDetections?.map(detection => {
-        const saved = assignments.get(detection.id);
-        const detectedRole = instrumentIdForArtwork(detection.default_instrument);
-        const defaultRole = INSTRUMENTS_BY_ID.has(detectedRole) ? detectedRole : region.defaultInstrumentId;
-        return saved !== defaultRole && INSTRUMENTS_BY_ID.has(saved) ? saved : null;
-      }).find(Boolean);
-      const role = INSTRUMENTS_BY_ID.get(manual ?? assignments.get(region.id));
-      if (role) applyArtworkInstrument(region, role);
-    }
-    renderRegionList();
-  }
-  rebuildBackingDrum();
-  rebuildReverseArrangement();
-
   for (const [role, values] of Object.entries(FM_SOUND)) {
     const saved = instruments?.[role];
     const legacyVolume = role === "organ" ? instruments?.strings?.volume : undefined;
@@ -5081,9 +5730,10 @@ function restorePresetSettings(settings) {
     values.space = clampUnit(saved?.space, .56);
     const defaultSends = defaultInstrumentSends(role);
     for (const [effect, initial] of Object.entries(defaultSends)) {
-      values.sends[effect] = Number.isFinite(saved?.sends?.[effect]) ? clampUnit(saved.sends[effect]) : initial;
+      const fixed = role === "bass" && BASS_FIXED_SENDS.has(effect);
+      values.sends[effect] = !fixed && Number.isFinite(saved?.sends?.[effect]) ? clampUnit(saved.sends[effect]) : initial;
     }
-    values.patch = STUDIO.fm.normalizeFmPatch(role, saved?.patch);
+    values.patch = STUDIO.fm.normalizeFmPatch(role, saved?.patch, { keepDefaults: Boolean(state.fmTakes) });
   }
   soundEngine.syncInstrumentPatches();
   refreshFmEditor();
@@ -5138,7 +5788,7 @@ async function openPerformancePreset(file) {
   try {
     const { name, manifest, settings } = await STUDIO.presets.readPreset(file);
     setLinkedMode(false);
-    await loadAnalysis(manifest);
+    await loadAnalysis(manifest, settings);
     if (state.eye.active || state.eye.starting) stopEyeTracking(false);
     await soundEngine.setEnabled(false);
     resetPointerPlayback(true);

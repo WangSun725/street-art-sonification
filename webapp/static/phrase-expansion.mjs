@@ -1,15 +1,14 @@
 // Original 4/4 material for the interactive pool. Beats are zero-based.
 // Drum hits: [beat, MIDI key, velocity]. Other parts: [beat, duration, velocity, voice count].
 // In Arp Synth only, the fourth value is a chord index (0=root, 1=third, 2=fifth, 3=octave).
+const drumPatterns = [
+  ["drums-new-2", "sparse", "Half-time pocket", [[0,36,114],[.75,42,70],[1.5,36,87],[2,39,105],[3.5,46,67]]],
+  ["drums-new-3", "medium", "Offbeat house", [[0,36,108],[.5,46,75],[1,36,97],[1,39,98],[1.5,42,71],[2,36,111],[2.5,46,74],[3,36,101],[3,39,103],[3.5,42,72]]],
+  ["drums-new-4", "medium", "Skippy two-step", [[0,36,109],[.5,42,72],[1,38,102],[1.75,42,57],[2.5,36,110],[2.75,42,65],[3,38,100],[3.5,42,71],[3.75,36,67]]],
+  ["drums-new-5", "dense", "Rolling hats", [[0,36,113],[.25,42,59],[.5,42,73],[.75,42,49],[1,38,101],[1.25,42,69],[1.75,42,72],[2,36,104],[2.5,36,90],[2.75,42,55],[3,38,109],[3.25,42,67],[3.5,46,80],[3.75,42,58]]],
+  ["drums-new-6", "dense", "Broken-beat fill", [[0,36,112],[.5,42,65],[.75,38,47],[1,38,101],[1.5,46,73],[1.75,36,91],[2.25,36,108],[2.5,42,69],[3,38,108],[3.25,42,57],[3.5,38,78],[3.75,38,91]]],
+];
 const roles = {
-  drums: [
-    ["Broken backbeat", [[0,36,111],[1,38,96],[1.75,42,65],[2.5,36,102],[3,38,102]]],
-    ["Half-time pocket", [[0,36,114],[.75,42,70],[1.5,36,87],[2,39,105],[3.5,46,67]]],
-    ["Offbeat house", [[0,36,108],[.5,46,75],[1,36,97],[1,39,98],[1.5,42,71],[2,36,111],[2.5,46,74],[3,36,101],[3,39,103],[3.5,42,72]]],
-    ["Skippy two-step", [[0,36,109],[.5,42,72],[1,38,102],[1.75,42,57],[2.5,36,110],[2.75,42,65],[3,38,100],[3.5,42,71],[3.75,36,67]]],
-    ["Rolling hats", [[0,36,113],[.25,42,59],[.5,42,73],[.75,42,49],[1,38,101],[1.25,42,69],[1.75,42,72],[2,36,104],[2.5,36,90],[2.75,42,55],[3,38,109],[3.25,42,67],[3.5,46,80],[3.75,42,58]]],
-    ["Broken-beat fill", [[0,36,112],[.5,42,65],[.75,38,47],[1,38,101],[1.5,46,73],[1.75,36,91],[2.25,36,108],[2.5,42,69],[3,38,108],[3.25,42,57],[3.5,38,78],[3.75,38,91]]],
-  ],
   percussion_texture: [
     ["Rim and low tom", [[.5,37,79],[1.75,45,81],[2.5,37,71],[3.5,47,93]]],
     ["Hand-drummed reply", [[.75,47,85],[1.5,45,70],[2.75,47,100],[3,45,55],[3.5,37,64]]],
@@ -99,6 +98,7 @@ function makeClip(role, id, densityBand, [title, pattern]) {
 }
 
 export const addedClips = [
+  ...drumPatterns.map(([id, band, ...pattern]) => makeClip("drums", id, band, pattern)),
   ...Object.entries(roles).flatMap(([role, variants]) => variants.map((pattern, i) =>
     makeClip(role, `${role}-new-${i + 1}`, bands[Math.floor(i / 2)], pattern))),
   ...Object.entries(organPatterns).flatMap(([band, variants]) => variants.map((pattern, i) =>
