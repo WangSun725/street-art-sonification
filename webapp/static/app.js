@@ -36,6 +36,12 @@ const scanTimeline = $("#scanTimeline");
 const scanTime = $("#scanTime");
 const scanReadout = $("#scanReadout");
 const scanDuration = $("#scanDuration");
+const liveHarmony = $("#liveHarmony");
+const liveHarmonyStatus = $("#liveHarmonyStatus");
+const liveHarmonyBar = $("#liveHarmonyBar");
+const liveHarmonyChords = $("#liveHarmonyChords");
+const liveHarmonyScan = $("#liveHarmonyScan");
+const liveHarmonyPosition = $("#liveHarmonyPosition");
 const pointerMode = $("#pointerMode");
 const scanMode = $("#scanMode");
 const interactionModeSwitch = $("#interactionModeSwitch");
@@ -347,7 +353,7 @@ function artworkPan(role, note) {
 let defaultFmBank;
 
 async function loadDefaultFmTakes() {
-  defaultFmBank ??= fetch("/static/fm-performance-bank.json?v=lead-selection1").then(async response => {
+  defaultFmBank ??= fetch("/static/fm-performance-bank.json?v=reviewed-materials1").then(async response => {
     if (!response.ok) throw new Error(`FM preset bank returned ${response.status}`);
     return STUDIO.fmBank.readPresetBank(await response.json());
   });
@@ -2769,6 +2775,67 @@ function renderAccompaniment(voices) {
   }
 }
 
+let displayedHarmonyPlan;
+let displayedHarmonyChord;
+
+function renderLiveHarmony({ beat, preview, scanning }) {
+  liveHarmony.hidden = !COMPOSITION || !state.regions.length;
+  if (liveHarmony.hidden) return;
+
+  const { scan, music, musicTimeline } = state;
+  const segment = state.mode === "scan" ? scan.route[scan.segmentIndex] : null;
+  const scanTransport = segment && !preview && (scanning || !musicTimeline.running);
+  const totalBars = scanTransport ? scan.route.at(-1).endBar : 0;
+  const running = Boolean(preview || (scanTransport ? scan.playing : musicTimeline.running));
+  const beatsPerSecond = music.bpm / 60;
+  const localBeat = scanTransport ? (scanning ? beat - scan.beatOffset : scan.seconds * beatsPerSecond) : beat;
+  const firstBeat = scanTransport && scan.playing ? scan.startedFrom * beatsPerSecond : 0;
+  // The scheduler queues notes ahead; use the due time for the display.
+  const audibleBeat = Math.max(firstBeat, localBeat - (running ? MUSIC_EVENT_BUFFER_MS / 1000 * beatsPerSecond : 0));
+  const bar = Math.min(Math.floor(audibleBeat / 4 + 1e-8), totalBars ? totalBars - 1 : Infinity);
+  const barProgress = clampUnit((audibleBeat - bar * 4) / 4);
+  const beatInBar = Math.min(4, Math.floor(barProgress * 4 + 1e-8) + 1);
+  const chordBar = bar + (scanTransport ? scan.beatOffset / 4 : 0);
+  const plan = ensureHarmonyPlan();
+  if (displayedHarmonyPlan !== plan) {
+    displayedHarmonyPlan = plan;
+    const degrees = plan.primary.name.split("–");
+    liveHarmonyChords.replaceChildren(...plan.primary.degrees.map((_, index) => {
+      const { tones: [root, third, fifth] } = harmonyAt(index * 4);
+      const note = NOTE_NAMES[positiveModulo(root, 12)];
+      const quality = fifth - root === 6 ? "°" : third - root === 3 ? "m" : "";
+      const chord = document.createElement("li");
+      const degree = document.createElement("span");
+      degree.textContent = degrees[index];
+      const name = document.createElement("strong");
+      name.textContent = note + quality;
+      chord.append(degree, name);
+      return chord;
+    }));
+  }
+  const currentChord = liveHarmonyChords.children[harmonyAt(chordBar * 4).chordIndex];
+  if (displayedHarmonyChord !== currentChord) {
+    displayedHarmonyChord?.removeAttribute("aria-current");
+    currentChord.setAttribute("aria-current", "step");
+    displayedHarmonyChord = currentChord;
+  }
+  liveHarmonyChords.style.setProperty("--bar-progress", barProgress.toFixed(3));
+  const barLabel = `Bar ${bar + 1}${totalBars ? ` / ${totalBars}` : ""} · Beat ${beatInBar}`;
+  if (liveHarmonyBar.textContent !== barLabel) liveHarmonyBar.textContent = barLabel;
+  const status = preview ? "Preview" : scanTransport ? (running ? "Scanning"
+    : scan.seconds >= scan.duration ? "Complete" : scan.seconds > 0 ? "Paused" : "Ready")
+    : running ? "Exploring" : "Ready";
+  if (liveHarmonyStatus.textContent !== status) liveHarmonyStatus.textContent = status;
+
+  liveHarmonyScan.hidden = !segment;
+  if (segment) {
+    const position = clampUnit(scan.position) * 100;
+    const label = `${segment.from > segment.to ? "←" : "→"} ${Math.round(position)}% from left`;
+    liveHarmonyScan.style.setProperty("--scan-position", `${position.toFixed(2)}%`);
+    if (liveHarmonyPosition.textContent !== label) liveHarmonyPosition.textContent = label;
+  }
+}
+
 function performanceFrame(now = performance.now()) {
   const region = state.activeRegion;
   const preview = state.regionPreview?.item;
@@ -2790,7 +2857,7 @@ function performanceFrame(now = performance.now()) {
   const activeVoices = runningScan ? voiceControls.filter(voice => !voice.accompaniment || audible.has(voice.regionId))
     : voiceControls;
   const scheduled = scheduleMusicEvents(voiceControls, beat, now);
-  return { x, y, speed, edge, preview, scanning, scanRegions, activeVoices, voiceControls, ...scheduled };
+  return { x, y, speed, edge, beat, preview, scanning, scanRegions, activeVoices, voiceControls, ...scheduled };
 }
 
 function updatePerformance(force = false) {
@@ -2813,6 +2880,7 @@ function updatePerformance(force = false) {
   } else {
     soundEngine.updatePointer(frame);
   }
+  renderLiveHarmony(frame);
   renderAccompaniment(frame.activeVoices);
   updateActiveRegionSource();
   $("#xValue").textContent = frame.x.toFixed(3);

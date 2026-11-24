@@ -940,6 +940,64 @@ body.setup-active { overflow: hidden; }
 .section-collapsed > .collapsible-content { display: none; }
 .collapsible-section.section-collapsed { padding-top: 11px; padding-bottom: 11px; }
 .collapsible-section.section-collapsed > .collapsible-heading { margin-bottom: 0; }
+
+.live-harmony { grid-column: 1 / -1; }
+.live-harmony .section-heading small { color: var(--muted); }
+.live-harmony-bar { margin: 0 0 6px; font-size: .9rem; font-weight: 700; }
+.live-harmony-chords {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.live-harmony-chords li {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  overflow: hidden;
+  padding: 4px 2px 5px;
+  border: 1px solid var(--soft-line);
+  border-radius: 6px;
+  background: var(--paper);
+  line-height: 1.25;
+}
+.live-harmony-chords span { color: var(--muted); font-size: .7rem; }
+.live-harmony-chords strong { font-size: .95rem; }
+.live-harmony-chords li[aria-current] { border-color: var(--accent); background: var(--accent-wash); }
+.live-harmony-chords li[aria-current]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 3px;
+  background: var(--accent);
+  transform: scaleX(var(--bar-progress, 0));
+  transform-origin: left;
+}
+.live-harmony-scan { margin-top: 10px; }
+.live-harmony-scan p {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 8px;
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: .75rem;
+}
+.live-harmony-scan strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.live-harmony-track { position: relative; height: 3px; margin: 0 4px 4px; border-radius: 2px; background: var(--soft-line); }
+.live-harmony-track::after {
+  content: "";
+  position: absolute;
+  inset: -3px auto -3px var(--scan-position, 0%);
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  transform: translateX(-50%);
+}
+
 .mode-swap-button { border-color: var(--line); background: var(--surface); }
 .new-artwork { width: 100%; min-height: 34px; margin-top: 7px; border: 1.5px solid rgba(38,37,32,.35); border-radius: 6px 9px 5px 8px; background: transparent; color: var(--muted); font-size: .64rem; cursor: pointer; }
 .new-artwork:hover { border-color: var(--ink); background: rgba(214,170,62,.08); color: var(--ink); }

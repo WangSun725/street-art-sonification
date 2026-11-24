@@ -4,6 +4,7 @@ import vm from "node:vm";
 import pool from "./static/midi-candidate-pool.mjs";
 import { addedClips } from "./static/phrase-expansion.mjs";
 import { expandedRhythmClips } from "./static/rhythm-pool-expansion.mjs";
+import { reviewedRhythms } from "./static/reviewed-rhythms.mjs";
 import { rwcLeadPhrases } from "./static/rwc-lead-pool.mjs";
 import { rankLeadPhrases } from "./static/lead-chord-fit.mjs";
 import * as composition from "./static/artwork-composition.mjs";
@@ -13,11 +14,9 @@ const materialPool = [...pool.clips, ...addedClips, ...expandedRhythmClips]
   .filter(clip => !["strings", "lead_synth"].includes(clip.role));
 const nonLead = [...new Set(materialPool.map(clip => clip.role))];
 assert.equal(new Set(expandedRhythmClips.map(clip => `${clip.source.file}:${clip.source.bar}`)).size, 96);
-const acceptedDrumIds = new Set([
-  "drums-03", "drums-05", "drums-gmd-02", "drums-gmd-04", "drums-gmd-05",
-  "drums-new-2", "drums-new-3", "drums-new-4", "drums-new-5", "drums-new-6",
-]);
-const tomNotes = new Set([43, 47, 50]);
+const reviewedCounts = { drums: 25, percussion_texture: 19, organ: 25, guitar: 30, keys_mallet: 20 };
+assert.equal(new Set(reviewedRhythms.map(clip => clip.id)).size, reviewedRhythms.length);
+assert.equal(reviewedRhythms.length, Object.values(reviewedCounts).reduce((sum, count) => sum + count, 0));
 const brokenBeatDrums = composition.pickPhrase("drums", .2, 4);
 const matchingBass = composition.pickBassForDrums(.1, 2, brokenBeatDrums);
 const kickBeats = new Set(brokenBeatDrums.flatMap((clip, bar) => clip.groups
@@ -33,51 +32,38 @@ for (let seed = 0; seed < 26; seed++) {
   assert.ok(phrase.flatMap(clip => clip.groups).every(group => Number.isInteger(group.beat * 4)));
 }
 for (const role of nonLead) {
-  const material = materialPool.filter(clip => clip.role === role);
-  for (const band of ["sparse", "medium", "dense"]) {
-    assert.equal(expandedRhythmClips.filter(clip => clip.role === role && clip.densityBand === band).length, 4);
-  }
-  if (role === "drums") {
-    assert.equal(material.length, 22);
-    assert.ok([...acceptedDrumIds].every(id => material.some(clip => clip.id === id)));
-  } else assert.equal(material.length, 26);
+  const reviewed = reviewedRhythms.filter(clip => clip.role === role);
+  const original = materialPool.filter(clip => clip.role === role);
+  const material = reviewed.length ? reviewed : original;
+  assert.equal(material.length, reviewedCounts[role] ?? 26);
   const discovered = new Set();
-  for (const [density, band] of [[0, "sparse"], [.1, "medium"], [.2, "dense"]]) for (let seed = 0; seed < material.length; seed++) {
-    const phrase = composition.pickPhrase(role, density, seed);
-    assert.equal(phrase.length, 4);
-    assert.equal(phrase[0], phrase[2]);
-    assert.notEqual(phrase[1].id, phrase[3].id);
-    const alternative = composition.pickPhrase(role, density, seed, phrase);
-    const rhythm = clips => clips.map(clip => clip.groups.map(group => [
-      Math.round(group.beat * 8), group.events.map(event => Math.round(event.duration * 4)),
-    ]));
-    assert.notDeepEqual(rhythm(phrase), rhythm(alternative), role + " reused the same phrase");
-    assert.ok([...phrase, ...alternative].every(clip => clip.densityBand === band));
-    if (role === "organ") {
-      assert.ok(phrase.every(clip => clip.groups.length >= 1 && clip.groups.length <= 2));
-      assert.ok(phrase.every(clip => clip.events.every(event => event.duration < .6)));
-    }
-    if (role === "drums") {
-      for (const [bar, clip] of phrase.entries()) {
-        assert.equal(clip.groups[0].beat, 0);
-        assert.ok(clip.groups[0].events.some(event => event.note === 36));
-        const toms = clip.events.filter(event => tomNotes.has(event.note));
-        if (bar === 3) {
-          assert.ok(toms.length >= 2 && toms.length <= 4);
-          assert.ok(toms.every(event => event.beat >= 3 && event.beat + event.duration <= 4));
-          assert.equal(toms.at(-1).note, 43);
-        } else assert.equal(toms.length, 0);
-        const original = material.find(source => source.id === (clip.sourceClipId ?? clip.id));
-        if (original.source.title === "Google Magenta Groove MIDI Dataset") {
-          const hats = events => events.filter(event => event.note === 42 || event.note === 46);
-          assert.deepEqual(hats(clip.events), hats(original.events).filter(event => bar !== 3 || event.beat < 3));
-          assert.ok(clip.events.filter(event => event.note === 38 && event.velocity >= 100)
-            .every(event => [1, 2, 3].includes(event.beat)));
-        }
+  for (const [density, band] of [[0, "sparse"], [.1, "medium"], [.2, "dense"]]) {
+    const options = composition.rhythmPhrases(role, density);
+    assert.deepEqual(options.map(phrase => phrase[0].id),
+      material.filter(clip => clip.densityBand === band).map(clip => clip.id));
+    for (const [seed, phrase] of options.entries()) {
+      assert.equal(composition.pickPhrase(role, density, seed)[0], phrase[0]);
+      assert.equal(phrase.length, 4);
+      if (reviewed.length) {
+        const { bars } = reviewed.find(clip => clip.id === phrase[0].id);
+        const events = bars.map(bar => bar.events);
+        assert.deepEqual(phrase.map(bar => bar.events), events.length === 1 ? Array(4).fill(events[0]) : events);
+      } else {
+        assert.equal(phrase[0], phrase[2]);
+        assert.notEqual(phrase[1].id, phrase[3].id);
       }
-      assert.ok(alternative[3].events.some(event => tomNotes.has(event.note)));
+      const alternative = composition.pickPhrase(role, density, seed, phrase);
+      const rhythm = clips => clips.map(clip => clip.groups.map(group => [
+        Math.round(group.beat * 8), group.events.map(event => Math.round(event.duration * 4)),
+      ]));
+      assert.notDeepEqual(rhythm(phrase), rhythm(alternative), role + " reused the same phrase");
+      assert.ok([...phrase, ...alternative].every(clip => clip.densityBand === band));
+      if (role === "organ") {
+        assert.ok(phrase.every(clip => clip.groups.length >= 1 && clip.groups.length <= 2));
+        assert.ok(phrase.every(clip => clip.events.every(event => event.duration < .6)));
+      }
+      discovered.add(phrase[0].id);
     }
-    for (const clip of phrase) discovered.add(clip.sourceClipId ?? clip.id);
   }
   assert.deepEqual(discovered, new Set(material.map(clip => clip.id)), role + " lost an available pattern");
 }
@@ -148,14 +134,14 @@ const rhythmShape = bars => JSON.stringify(bars.map(clip => clip.groups.map(grou
   [Math.round(group.beat * 8), group.events.map(event => Math.round(event.duration * 4))])));
 for (const role of chordRoles) {
   for (const density of [.02, .1, .19]) {
-    const candidates = Array.from({ length: 26 }, (_, seed) => composition.pickPhrase(role, density, seed));
+    const candidates = composition.rhythmPhrases(role, density);
     for (const referenceRole of chordRoles.filter(item => item !== role)) {
       const reference = composition.pickPhrase(referenceRole, density, 2);
       const forward = composition.pickChordRhythm(role, density, 5, reference);
       const reverseReference = composition.pickPhrase(referenceRole, density, 2, reference);
       const reverse = composition.pickChordRhythm(role, density, 5, reverseReference, forward);
       for (const [chosen, anchor, excluded] of [[forward, reference, null], [reverse, reverseReference, forward]]) {
-        assert.ok(candidates.some(candidate => candidate.every((clip, index) => clip === chosen[index])));
+        assert.ok(candidates.some(candidate => candidate.every((clip, index) => clip.id === chosen[index].id)));
         if (excluded) assert.notEqual(rhythmShape(chosen), rhythmShape(excluded));
         const [overlap, attacks] = overlapScore(chosen, anchor);
         for (const candidate of candidates) {

@@ -3,6 +3,7 @@ import { addedClips } from "./phrase-expansion.mjs?v=drum-fill1";
 import { expandedRhythmClips } from "./rhythm-pool-expansion.mjs?v=same-band2";
 import { rwcLeadPhrases } from "./rwc-lead-pool.mjs?v=same-band2";
 import { rankLeadPhrases } from "./lead-chord-fit.mjs?v=rwc-lead1";
+import { reviewedRhythms } from "./reviewed-rhythms.mjs?v=1";
 
 const palette = [
   ["red", "#ff0000", "scarlet crimson vermilion maroon burgundy wine brick-red 红 红色"],
@@ -206,9 +207,23 @@ function prepareGrooveDrums(events) {
   return prepared.sort((a, b) => a.beat - b.beat);
 }
 
+const reviewedByRole = new Map();
+for (const { bars, ...clip } of reviewedRhythms) {
+  const measures = bars.map(({ events, source }, index) => ({
+    ...clip,
+    id: index === 0 ? clip.id : `${clip.id}-bar-${index + 1}`,
+    source: source ?? clip.source,
+    events,
+    groups: eventGroups(events),
+  }));
+  const phrase = measures.length === 1 ? Array(4).fill(measures[0]) : measures;
+  if (!reviewedByRole.has(clip.role)) reviewedByRole.set(clip.role, []);
+  reviewedByRole.get(clip.role).push(phrase);
+}
+
 const clipsByRole = new Map();
 for (const clip of [...pool.clips, ...addedClips, ...expandedRhythmClips]) {
-  if (clip.role === "strings" || clip.role === "lead_synth") continue;
+  if (clip.role === "strings" || clip.role === "lead_synth" || reviewedByRole.has(clip.role)) continue;
   if (!clipsByRole.has(clip.role)) clipsByRole.set(clip.role, []);
   let events = clip.events;
   if (clip.role === "drums" && clip.source.title === "Google Magenta Groove MIDI Dataset") {
@@ -240,8 +255,7 @@ function withTomEnding(clip) {
   return { ...clip, id: clip.id + "-tom-fill", sourceClipId: clip.id, events, groups: eventGroups(events) };
 }
 
-function assemblePhrase(ranked, variant) {
-  const start = ((variant % ranked.length) + ranked.length) % ranked.length;
+function assemblePhrase(ranked, start) {
   const motif = ranked[start];
   const answer = ranked[(start + 1) % ranked.length];
   const ending = ranked[(start + 2) % ranked.length];
@@ -256,12 +270,19 @@ function rhythmSignature(phrase) {
 }
 
 function* rhythmCandidates(role, density, variant, previous) {
-  const clips = (clipsByRole.get(role) ?? []).filter(clip => clip.densityBand === densityBand(density));
+  const band = densityBand(density);
+  const reviewed = reviewedByRole.get(role)?.filter(phrase => phrase[0].densityBand === band);
+  const clips = reviewed ?? (clipsByRole.get(role) ?? []).filter(clip => clip.densityBand === band);
   const excluded = previous ? rhythmSignature(previous) : null;
   for (let offset = 0; offset < clips.length; offset++) {
-    const phrase = assemblePhrase(clips, variant + offset);
+    const i = ((variant + offset) % clips.length + clips.length) % clips.length;
+    const phrase = reviewed ? reviewed[i] : assemblePhrase(clips, i);
     if (excluded === null || rhythmSignature(phrase) !== excluded) yield phrase;
   }
+}
+
+export function rhythmPhrases(role, density) {
+  return [...rhythmCandidates(role, density, 0, null)];
 }
 
 export function pickPhrase(role, density, variant, previous = null) {

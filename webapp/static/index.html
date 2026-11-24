@@ -7,7 +7,7 @@
   <meta name="description" content="Explore street art through responsive visual contours and sound.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=multitrack1">
+  <link rel="stylesheet" href="/static/styles.css?v=live-harmony1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
@@ -234,6 +234,21 @@
           <button id="logicOpen" class="logic-open" type="button">Interaction logic</button>
         </div>
       </header>
+
+      <section id="liveHarmony" class="control-section live-harmony collapsible-section" data-collapsible aria-labelledby="liveHarmonyHeading" hidden>
+        <div class="section-heading collapsible-heading">
+          <h2 id="liveHarmonyHeading">Live Harmony</h2>
+          <div class="section-heading-actions"><small id="liveHarmonyStatus">Ready</small></div>
+        </div>
+        <div class="collapsible-content">
+          <p id="liveHarmonyBar" class="live-harmony-bar">Bar 1 · Beat 1</p>
+          <ol id="liveHarmonyChords" class="live-harmony-chords" role="list" aria-label="Chord progression"></ol>
+          <div id="liveHarmonyScan" class="live-harmony-scan" hidden>
+            <p><span>Scan position</span><strong id="liveHarmonyPosition"></strong></p>
+            <div class="live-harmony-track" aria-hidden="true"></div>
+          </div>
+        </div>
+      </section>
 
       <section class="collapsible-section effects-section" data-collapsible aria-label="Live FM and effects">
         <div class="collapsible-heading"><div><strong>Live FM and Effects</strong></div><div class="section-heading-actions"></div></div>
@@ -487,16 +502,16 @@
   <input id="presetFile" type="file" accept=".json,application/json" hidden>
   <script src="/static/vendor/webgazer/webgazer.js?v=3.5.3-local1" defer></script>
   <script type="module">
-    import * as composition from "/static/artwork-composition.mjs?v=chord-rhythm1";
+    import * as composition from "/static/artwork-composition.mjs?v=reviewed-materials1";
     import * as fm from "/static/fm-patches.mjs?v=electronic-patches1";
     import * as fmBank from "/static/fm-preset-bank.mjs?v=electronic-patches1";
-    import fmGains from "/static/fm-performance-gains.mjs?v=lead-selection1";
+    import fmGains from "/static/fm-performance-gains.mjs?v=reviewed-materials1";
     import * as scan from "/static/scan-path.mjs?v=scan-accompaniment1";
     import * as presets from "/static/performance-preset.mjs?v=region-instruments1";
     import * as multitrack from "/static/multitrack-output.mjs?v=multitrack1";
     window.StreetArtComposition = composition;
     window.StreetArtStudio = { fm, fmBank, fmGains, scan, presets, multitrack };
-    await import("/static/app.js?v=scan-turnaround1");
+    await import("/static/app.js?v=live-harmony1");
     fetch("/runtime/mix-review/manifest.json", { method: "HEAD", cache: "no-store" })
       .then(response => { document.getElementById("mixReviewLink").hidden = !response.ok; })
       .catch(() => {});

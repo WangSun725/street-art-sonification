@@ -9,8 +9,6 @@ import vm from "node:vm";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 
 import * as composition from "../webapp/static/artwork-composition.mjs";
-import pool from "../webapp/static/midi-candidate-pool.mjs";
-import { addedClips } from "../webapp/static/phrase-expansion.mjs";
 import { expandedRhythmClips } from "../webapp/static/rhythm-pool-expansion.mjs";
 import * as fm from "../webapp/static/fm-patches.mjs";
 import { fmTakePatches, readPresetBank } from "../webapp/static/fm-preset-bank.mjs";
@@ -32,7 +30,7 @@ const instruments = [
   { id: "drums", label: "Drums", presets: [
     "kick-felt", "snare-dust", "clap-tight", "closed-foot", "open-cut", "low-tom-felt", "mid-tom-felt", "high-tom-tight",
   ] },
-  { id: "bass", label: "Acid Bass", presets: ["bass-deep"] },
+  { id: "bass", label: "Acid Bass", presets: ["bass-hollow"] },
   { id: "counter_synth", label: "Arp Synth", presets: ["arp-wood"] },
   { id: "guitar", label: "Guitar", presets: ["guitar-nylon"] },
   { id: "pad", label: "Pad", presets: ["pad-cloud"] },
@@ -42,7 +40,6 @@ const instruments = [
 ];
 
 const addedIds = new Set(expandedRhythmClips.map(clip => clip.id));
-const clips = [...pool.clips, ...addedClips, ...expandedRhythmClips];
 const performanceBank = readPresetBank(JSON.parse(fs.readFileSync(new URL("fm-performance-bank.json", staticDir), "utf8")));
 const presets = new Map(performanceBank.presets.map(preset => [preset.id, preset]));
 
@@ -132,16 +129,13 @@ function renderGroup({ id, label, presets: presetIds }, directory) {
     return preset;
   });
   const patchMessage = { type: "performance-patches", takes: fmTakePatches({ A: take, B: take }, gains) };
-  const patternBank = clips.filter(clip => clip.role === id);
   const destination = path.join(directory, id);
   fs.mkdirSync(destination);
   const previews = [];
   let peak = 0;
 
   for (const [band, density] of Object.entries(densityBands)) {
-    const count = patternBank.filter(clip => clip.densityBand === band).length;
-    for (let index = 0; index < count; index++) {
-      const phrase = composition.pickPhrase(id, density, index);
+    for (const phrase of composition.rhythmPhrases(id, density)) {
       const motif = phrase[0];
       assert.equal(motif.densityBand, band);
       const messages = score(id, phrase, { bpm, root, mode }, leadIn, beatSeconds);
@@ -161,14 +155,14 @@ function renderGroup({ id, label, presets: presetIds }, directory) {
         steps,
         attacks: motif.groups.length,
         source: motif.source,
-        added: addedIds.has(motif.id),
+        added: motif.newlyAdded === true || addedIds.has(motif.id),
         phrase: phrase.map(clip => clip.sourceClipId ?? clip.id),
         file: path.posix.join(path.basename(directory), id, motif.id + ".m4a"),
       });
     }
   }
 
-  assert.deepEqual(new Set(previews.map(clip => clip.id)), new Set(patternBank.map(clip => clip.id)));
+  assert.equal(new Set(previews.map(clip => clip.id)).size, previews.length);
   const playbackGain = Math.min(3, .88 / peak);
   for (const clip of previews) {
     const fileBase = path.join(destination, clip.id);
