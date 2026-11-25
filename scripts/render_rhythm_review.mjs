@@ -88,7 +88,8 @@ function compileApp() {
 function compileWorklet() {
   const source = fs.readFileSync(new URL("fm-worklet.js", staticDir), "utf8").replace(/^import .*;\n/, "");
   const bindings = [
-    "DRUM_DEFAULTS", "DRUM_VOICES", "FACTORY_PATCHES", "PATCHES", "applyFmPatch", "normalizeDrumPatch", "normalizeFmPatch",
+    "DRUM_DEFAULTS", "DRUM_VOICES", "FACTORY_PATCHES", "PATCHES", "OPERATOR_ADSR_DEFAULTS", "OPERATOR_FIXED_HZ",
+    "applyFmPatch", "normalizeDrumPatch", "normalizeFmPatch",
   ];
   return new Function(...bindings, "sampleRate", "AudioWorkletProcessor", "registerProcessor",
     source + "\nreturn StreetArtFMProcessor;")(

@@ -3064,7 +3064,7 @@ class SoundEngine {
     wetFilter.type = "highpass";
     wetFilter.frequency.value = 190;
     await withAudioTimeout(
-      context.audioWorklet.addModule("/static/fm-worklet.js?v=scan-turnaround1"),
+      context.audioWorklet.addModule("/static/fm-worklet.js?v=operator-adsr1"),
       2000,
       "The browser sound engine did not load in time",
     );

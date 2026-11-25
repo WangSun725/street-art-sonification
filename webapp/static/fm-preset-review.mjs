@@ -1,14 +1,18 @@
 import { reviewPresets } from "./fm-review-presets.mjs?v=1";
-import { DRUM_VOICES } from "./fm-patches.mjs?v=electronic-patches1";
-import { PRESET_BANK_FORMAT, PRESET_BANK_STORAGE, readPresetBank, snapshotBankPreset } from "./fm-preset-bank.mjs?v=electronic-patches1";
+import { DRUM_VOICES } from "./fm-patches.mjs?v=operator-adsr1";
+import { PRESET_BANK_FORMAT, PRESET_BANK_STORAGE, readPresetBank, snapshotBankPreset } from "./fm-preset-bank.mjs?v=operator-adsr1";
 
 const requestedRound = new URLSearchParams(location.search).get("round");
 const leadReview = requestedRound === "lead";
+const fullReview = requestedRound === "operators-all";
+const operatorReview = requestedRound === "operators" || fullReview;
+const rerateSaved = leadReview || fullReview;
 const round = ["2", "3", "4"].includes(requestedRound) ? Number(requestedRound) : 1;
-const hasPrevious = leadReview || round > 1;
-const levelMatchedReview = leadReview || round >= 3;
+const hasPrevious = leadReview || operatorReview || round > 1;
+const levelMatchedReview = leadReview || operatorReview || round >= 3;
 const firstRoundAudio = "/runtime/fm-preset-review/audio/";
-const reviewRoot = leadReview ? "/runtime/fm-preset-review-lead/" : `/runtime/fm-preset-review-round${round}/`;
+const reviewRoot = operatorReview ? "/runtime/fm-preset-review-operators/"
+  : leadReview ? "/runtime/fm-preset-review-lead/" : `/runtime/fm-preset-review-round${round}/`;
 const saveStatus = document.querySelector("#save-status");
 
 async function leadMaterials() {
@@ -30,9 +34,19 @@ async function leadMaterials() {
 }
 
 async function continuingMaterials() {
-  const response = await fetch(reviewRoot + "kept-bank.json");
+  const response = await fetch(reviewRoot + (fullReview ? "submitted-bank.json" : "kept-bank.json"));
   if (!response.ok) throw new Error("Could not load the previously kept bank.");
   const keptBank = readPresetBank(await response.json());
+  if (operatorReview) {
+    const { operatorReviewPresets } = await import("./fm-review-presets-operators.mjs?v=1");
+    if (!fullReview) return { previous: keptBank.presets, candidates: operatorReviewPresets };
+    const latest = new Map(operatorReviewPresets.map(preset => [preset.id, preset]));
+    const savedIds = new Set(keptBank.presets.map(preset => preset.id));
+    return {
+      previous: keptBank.presets.map(preset => ({ ...preset, description: latest.get(preset.id)?.description })),
+      candidates: operatorReviewPresets.filter(preset => !savedIds.has(preset.id)),
+    };
+  }
   const { roundTwoPresets } = await import("./fm-review-presets-round2.mjs?v=2");
   const { roundThreePresets } = levelMatchedReview ? await import("./fm-review-presets-round3.mjs?v=1") : { roundThreePresets: [] };
   const originals = new Map([...reviewPresets, ...roundTwoPresets, ...roundThreePresets].map(item => [item.id, item]));
@@ -46,7 +60,7 @@ const { previous, candidates } = hasPrevious ? await (leadReview ? leadMaterials
   saveStatus.textContent = error.message;
   throw error;
 }) : { previous: [], candidates: reviewPresets };
-const selectable = leadReview ? [...previous, ...candidates] : candidates;
+const selectable = rerateSaved ? [...previous, ...candidates] : candidates;
 
 const names = {
   lead_synth: "Lead Synth", counter_synth: "Arp Synth", bass: "Acid Bass", guitar: "Guitar",
@@ -70,19 +84,22 @@ const progress = document.querySelector("#progress");
 const carried = document.querySelector("#carried");
 const carriedTitle = document.querySelector("#carried-title");
 const candidatesTitle = document.querySelector("#candidates-title");
-const ratingStorage = `street-art-fm-audition-ratings${leadReview ? "-lead" : hasPrevious ? `-round${round}` : ""}-v1`;
+const ratingStorage = `street-art-fm-audition-ratings${operatorReview ? `-${requestedRound}` : leadReview ? "-lead" : hasPrevious ? `-round${round}` : ""}-v1`;
 let selection = "lead_synth";
 let decisions = {};
 let playing;
 
 if (hasPrevious) {
-  document.title = leadReview ? "Lead Preset Review" : `FM Preset Review · Round ${round}`;
+  document.title = fullReview ? "FM Preset Review · Full Bank" : operatorReview ? "FM Preset Review · Operator ADSR"
+    : leadReview ? "Lead Preset Review" : `FM Preset Review · Round ${round}`;
   document.querySelector("#review-title").textContent = document.title;
-  document.querySelector("#review-description").textContent = `${previous.length} ${leadReview ? "current" : "previously kept"} · ${candidates.length} new sounds`;
-  document.querySelector("#filter-label").textContent = leadReview ? "Show" : "Show new";
+  document.querySelector("#review-description").textContent = fullReview
+    ? `${previous.length} previously saved · ${candidates.length} other candidates from the latest round`
+    : `${previous.length} ${leadReview ? "current" : "previously kept"} · ${candidates.length} new sounds`;
+  document.querySelector("#filter-label").textContent = rerateSaved ? "Show" : "Show new";
   document.querySelector("#carried-section").hidden = false;
   candidatesTitle.hidden = false;
-  save.textContent = leadReview ? "Export Lead selections" : "Save updated bank";
+  save.textContent = fullReview ? "Export selections" : leadReview ? "Export Lead selections" : "Save updated bank";
   if (leadReview) {
     voices.hidden = true;
     voices.parentElement.classList.add("lead-review");
@@ -99,7 +116,7 @@ function decisionOf(id) {
 }
 
 function updateView() {
-  const visible = leadReview ? [...carried.children, ...presets.children] : [...presets.children];
+  const visible = rerateSaved ? [...carried.children, ...presets.children] : [...presets.children];
   for (const card of visible) {
     const decision = decisionOf(card.dataset.preset);
     card.hidden = filter.value !== "all" && filter.value !== decision;
@@ -111,20 +128,21 @@ function updateView() {
   empty.hidden = visible.some(card => !card.hidden);
   for (const button of voices.querySelectorAll("[data-group]")) {
     const group = groups.get(button.dataset.group);
-    const reviewed = group.items.filter(item => decisionOf(item.id) !== "pending").length;
+    const reviewable = rerateSaved ? [...group.kept, ...group.items] : group.items;
+    const reviewed = reviewable.filter(item => decisionOf(item.id) !== "pending").length;
     button.setAttribute("aria-current", String(button.dataset.group === selection));
-    if (levelMatchedReview) {
+    if (levelMatchedReview && !operatorReview) {
       const totalKept = group.kept.length + group.items.filter(item => decisionOf(item.id) === "keep").length;
       button.lastElementChild.textContent = `${totalKept} / 5 kept`;
     } else {
-      button.lastElementChild.textContent = `${reviewed} / ${group.items.length}`;
+      button.lastElementChild.textContent = `${reviewed} / ${reviewable.length}`;
     }
   }
   const kept = selectable.filter(item => decisionOf(item.id) === "keep").length;
   const rejected = selectable.filter(item => decisionOf(item.id) === "reject").length;
   const summary = `${kept} kept · ${rejected} rejected · ${selectable.length - kept - rejected} unreviewed`;
-  progress.textContent = hasPrevious && !leadReview ? `${previous.length} carried over · ${summary}` : summary;
-  save.disabled = (leadReview ? 0 : previous.length) + kept === 0;
+  progress.textContent = hasPrevious && !rerateSaved ? `${previous.length} carried over · ${summary}` : summary;
+  save.disabled = fullReview ? kept + rejected === 0 : (leadReview ? 0 : previous.length) + kept === 0;
 }
 
 function textElement(tag, text) {
@@ -156,7 +174,7 @@ function cardFor(preset, previouslyKept = false) {
   const actions = document.createElement("div");
   actions.className = "actions";
   card.append(description, audio, actions);
-  if (previouslyKept && !leadReview) {
+  if (previouslyKept && !rerateSaved) {
     const label = textElement("span", "Kept");
     label.className = "saved-label";
     actions.append(label);
@@ -188,9 +206,10 @@ function showGroup(id) {
   const group = groups.get(id);
   heading.textContent = group.name;
   if (hasPrevious) {
-    carriedTitle.textContent = `${leadReview ? "Current presets" : "Previously kept"} · ${group.kept.length}`;
+    carriedTitle.textContent = `${fullReview ? "Previously saved" : leadReview || operatorReview ? "Current presets" : "Previously kept"} · ${group.kept.length}`;
     carried.replaceChildren(...group.kept.map(item => cardFor(item, true)));
-    candidatesTitle.textContent = `New candidates · ${group.items.length}`;
+    candidatesTitle.textContent = `${fullReview ? "Other candidates" : "New candidates"} · ${group.items.length}`;
+    candidatesTitle.hidden = fullReview && group.items.length === 0;
   }
   presets.replaceChildren(...group.items.map(item => cardFor(item)));
   updateView();
@@ -201,7 +220,8 @@ for (const [label, ids] of [["Instruments", Object.keys(names)], ["Drum pieces",
   const list = document.createElement("div");
   list.className = "voice-list";
   for (const id of ids) {
-    if (levelMatchedReview && !groups.get(id).items.length) continue;
+    const group = groups.get(id);
+    if (levelMatchedReview && !group.items.length && !(fullReview && group.kept.length)) continue;
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.group = id;
@@ -220,10 +240,13 @@ save.addEventListener("click", () => {
     format: PRESET_BANK_FORMAT,
     version: 1,
     name: leadReview ? "Street Art FM · Selected Lead Presets" : "Street Art FM · Selected Presets",
-    presets: (leadReview ? kept : [...previous, ...kept]).map(snapshotBankPreset),
+    presets: (rerateSaved ? kept : [...previous, ...kept]).map(snapshotBankPreset),
+    ...(fullReview && { review: { decisions: Object.fromEntries(selectable.map(item => [item.id, decisionOf(item.id)])) } }),
   };
   const json = JSON.stringify(bank, null, 2) + "\n";
-  if (leadReview) {
+  if (fullReview) {
+    saveStatus.textContent = `Downloaded ${kept.length} kept presets and the full review decisions.`;
+  } else if (leadReview) {
     saveStatus.textContent = `Downloaded ${kept.length} selected Lead presets.`;
   } else {
     try {
@@ -236,7 +259,8 @@ save.addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = leadReview ? "street-art-lead-choices.json" : `street-art-fm-preset-bank${hasPrevious ? `-round${round}` : ""}.json`;
+  link.download = fullReview ? "street-art-fm-preset-bank-full-review.json" : operatorReview ? "street-art-fm-preset-bank-operators.json"
+    : leadReview ? "street-art-lead-choices.json" : `street-art-fm-preset-bank${hasPrevious ? `-round${round}` : ""}.json`;
   document.body.append(link);
   link.click();
   link.remove();

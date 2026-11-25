@@ -225,7 +225,9 @@ Kick and Acid Bass bypass the Delay and Reverb sends. The other pieces of the dr
 
 The drum phrase replaces late hits in the fourth bar with two to four tom strokes. Low, Mid and High Tom are synthesized drum voices on MIDI notes 43, 47 and 50 and can be auditioned and adjusted in the FM Patch Editor.
 
-**FM Patch Editor → Preset review** opens five synthesized sounds for each instrument and each drum piece. The previews use the same performance within each group and match levels for comparison. Mark sounds **Keep** or **Reject**, then use **Save kept presets** to download a JSON bank and load it in the editor on the same browser. Use **Import preset bank** on another browser. To regenerate the local previews, run `node scripts/render_fm_preset_review.mjs` with `ffmpeg` available.
+**FM Patch Editor → Preset review** opens the Operator ADSR review, with two new sounds for each instrument and drum piece. Run `node scripts/render_fm_preset_review.mjs --operator-review` with `ffmpeg` available to generate the level-matched previews. **Save updated bank** saves the keep choices in the browser and downloads a JSON bank. Use **Import preset bank** to load it in another browser.
+
+To review every sound again, place the exported bank at `webapp/runtime/fm-preset-review-operators/submitted-bank.json` and open the local [full-bank review](http://127.0.0.1:8765/static/fm-preset-review.html?round=operators-all). **Export selections** downloads the kept sounds and all review decisions. The [original five-sound review](http://127.0.0.1:8765/static/fm-preset-review.html) remains available after generating its previews with `node scripts/render_fm_preset_review.mjs`.
 
 The local [second preset review](http://127.0.0.1:8765/static/fm-preset-review.html?round=2) places the saved sounds above the new candidates in each group. **Save updated bank** exports the saved sounds and any new sounds marked **Keep**. To regenerate the new previews, pass `--round2` to the same render script. The second review reads the original selection from `webapp/runtime/fm-preset-review-round2/kept-bank.json`.
 

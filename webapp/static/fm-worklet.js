@@ -1,4 +1,4 @@
-import { DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, applyFmPatch, normalizeDrumPatch, normalizeFmPatch } from "./fm-patches.mjs?v=electronic-patches1";
+import { DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, OPERATOR_ADSR_DEFAULTS, OPERATOR_FIXED_HZ, applyFmPatch, normalizeDrumPatch, normalizeFmPatch } from "./fm-patches.mjs?v=operator-adsr1";
 
 // In Safari, reading the worklet global calls into WebKit. Read it once
 // for this context instead of looking it up for every sample of every voice.
@@ -30,6 +30,12 @@ const SATURATION_TABLE_SCALE = 1024;
 const SATURATION_TABLE = new Float64Array(8 * SATURATION_TABLE_SCALE + 1);
 const KICK_CLICK_HIGHPASS = 1 - Math.exp(-TAU * 450 / SAMPLE_RATE);
 const KICK_CLICK_LOWPASS = 1 - Math.exp(-TAU * 3200 / SAMPLE_RATE);
+const BASS_SIDECHAIN_THRESHOLD = .085;
+const BASS_SIDECHAIN_MIN_GAIN = 10 ** (-2.5 / 20);
+const BASS_SIDECHAIN_ATTACK = 1 - Math.exp(-1 / (SAMPLE_RATE * .003));
+const BASS_SIDECHAIN_RELEASE = 1 - Math.exp(-1 / (SAMPLE_RATE * .040));
+const KICK_PEAK_DECAY = Math.exp(-1 / (SAMPLE_RATE * .012));
+const BASS_FM_LAYER_HIGHPASS = 1 - Math.exp(-TAU * 115 / SAMPLE_RATE);
 for (let index = 0; index < SINE_TABLE_SIZE; index++) {
   SINE_TABLE[index] = Math.sin(TAU * index / SINE_TABLE_SIZE);
 }
@@ -84,8 +90,8 @@ function waveformTable(shape, frequency) {
 }
 
 function tablesForPatch(patch, frequency) {
-  return patch.waveforms?.map((shape, index) =>
-    waveformTable(shape, frequency * patch.ratios[index] * 1.5));
+  return patch.waveforms?.map((shape, index) => waveformTable(shape, patch.operatorTuning?.[index] === "fixed"
+    ? patch.operatorHz?.[index] ?? OPERATOR_FIXED_HZ : frequency * patch.ratios[index] * 1.5));
 }
 
 function oscillatorSample(phase, table) {
@@ -496,6 +502,17 @@ function modulationEnvelope(time, decay, sustain, attack = .004) {
   return sustain + (1 - sustain) * fastExpNeg((time - attack) / Math.max(.006, decay));
 }
 
+function operatorGainAt(voice, patch, index, time) {
+  const settings = voice.operatorEnvelopes?.[index];
+  return (patch.operatorGain?.[index] ?? 1) * (settings ? envelope(time, voice.duration, settings) : 1);
+}
+
+function operatorModulationAt(voice, patch, index, time, sustain, attack) {
+  if (voice.operatorEnvelopes?.[index]) return operatorGainAt(voice, patch, index, time);
+  return modulationEnvelope(time, patch.modDecay[index] * voice.gemsBank.modDecay, sustain, attack)
+    * (patch.operatorGain?.[index] ?? 1);
+}
+
 function bassVolumeGain(voice, time) {
   const { volumeLfoDepth: depth = 0, volumeLfoRate: rate = 2 } = voice.patch || PATCHES.bass;
   if (depth === 0) return 1;
@@ -580,6 +597,8 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     this.kickDuck = 0;
     this.kickDecay = Math.exp(-1 / (SAMPLE_RATE * .125));
     this.duckAttack = 1 / (SAMPLE_RATE * .006);
+    this.kickPeak = 0;
+    this.bassSidechainGain = 1;
     this.port.onmessage = (event) => this.handleMessage(event.data || {});
   }
 
@@ -654,6 +673,8 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       this.lastFrequencyByRole.clear();
       this.kickEnvelope = 0;
       this.kickDuck = 0;
+      this.kickPeak = 0;
+      this.bassSidechainGain = 1;
       for (const mix of this.regionMix.values()) mix.target = 0;
     }
   }
@@ -854,6 +875,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const glideSeconds = tunedLead ? 0 : patch.glide || 0;
     const tableFrequency = glideSeconds ? Math.max(targetFrequency, previousFrequency || 0) : targetFrequency;
     const operatorTables = tablesForPatch(patch, tableFrequency);
+    const operatorEnvelopes = patch.operatorEnvelope?.map((mode, index) => mode === "adsr"
+      ? [patch.operatorAttack?.[index] ?? OPERATOR_ADSR_DEFAULTS[0],
+        patch.operatorDecay?.[index] ?? OPERATOR_ADSR_DEFAULTS[1],
+        patch.operatorSustain?.[index] ?? OPERATOR_ADSR_DEFAULTS[2],
+        patch.operatorRelease?.[index] ?? OPERATOR_ADSR_DEFAULTS[3]] : null);
+    const fixedOperatorSteps = patch.operatorTuning?.map((mode, index) => mode === "fixed"
+      ? TAU * (patch.operatorHz?.[index] ?? OPERATOR_FIXED_HZ) / SAMPLE_RATE : null);
     const drumWaveform = drumOverrides?.waveform ?? drum?.defaults.waveform;
     const drumBodyTable = drumWaveform ? waveformTable(drumWaveform, drum.defaults.kind === "tom"
       ? (drumOverrides?.fundamental ?? drum.defaults.fundamental) + (drumOverrides?.sweep ?? drum.defaults.sweep)
@@ -880,6 +908,9 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       reducedQuality: this.voices.length + this.presences.size >= FULL_QUALITY_VOICES,
       presetGain: (drum ? take?.drumGains?.[drumNote] : take?.instrumentGains?.[role]) ?? 1,
       operatorTables,
+      operatorEnvelopes,
+      fixedOperatorSteps,
+      customOperators: Boolean(operatorEnvelopes?.some(Boolean) || fixedOperatorSteps?.some(Boolean) || patch.operatorGain),
       drumBodyTable,
       drumSettings: drum?.defaults,
       drumOverrides,
@@ -926,6 +957,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       sawSideLow: 0,
       sideSample: 0,
       duckDepth: patch.duckDepth || 0,
+      bassSidechain: role === "bass" && message.gemsWeights === "artwork",
       attackControl: clamp(Number(controls.attack) || 0, 0, 1),
       releaseControl: clamp(Number(controls.release) || 0, 0, 1),
       chorus: clamp(Number(controls.chorus) || 0, 0, 1),
@@ -994,17 +1026,18 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       (voice.texture * .0007 + voice.chorus * .0018) * bank.detune * bank.stereo;
     const phaseStep = TAU * voice.frequency * pitchScale / SAMPLE_RATE;
     // Two-operator patches never read the unused phases during this note.
-    const operators = !voice.reducedQuality ? 4 : patch.algorithm === "parallel" || patch.algorithm === "carriers" ? 3 : 2;
+    const reducedOperators = voice.reducedQuality && !voice.customOperators;
+    const operators = !reducedOperators ? 4 : patch.algorithm === "parallel" || patch.algorithm === "carriers" ? 3 : 2;
     for (let index = 0; index < operators; index++) {
-      if (voice.reducedQuality && patch.algorithm === "carriers" && index === 1) continue;
+      if (reducedOperators && patch.algorithm === "carriers" && index === 1) continue;
       const alternating = index === 0 && voice.tunedLead ? 0 : index % 2 ? detune : -detune;
       // Keep the operator ratios close to whole-number relationships so the
       // perceived fundamental survives visual modulation. Hue still colours
       // the spectrum, but no longer pushes upper operators far enough away
       // from their harmonic ratios to create a noise-like cluster.
       const hueWarp = index === 0 ? 1 : 1 + (voice.hue - .5) * .0025 * index;
-      const phase = voice.phases[index]
-        + phaseStep * patch.ratios[index] * hueWarp * (1 + alternating + vibrato);
+      const step = voice.fixedOperatorSteps?.[index] ?? phaseStep * patch.ratios[index] * hueWarp * (1 + alternating + vibrato);
+      const phase = voice.phases[index] + step;
       voice.phases[index] = phase < TAU ? phase : phase % TAU;
     }
     if (voice.kind === "presence" || (voice.reducedQuality && patch.analogMix > .1) || !patch.unison) return;
@@ -1192,7 +1225,18 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     }
     const driven = saturate((voice.filterLow * .82 + voice.filterBand * .22) * patch.drive * bank.drive);
     const body = (patch.octaveBody || 0) * fastSin(TAU * voice.acidPhase * 2);
-    const output = patch.cleanSub ? driven * .70 + sub * patch.cleanSub * .56 + body : driven;
+    let output = patch.cleanSub ? driven * .70 + sub * patch.cleanSub * .56 + body : driven;
+    if (patch.bassFmAmount > 0) {
+      voice.metalPhase = (voice.metalPhase + increment * (patch.bassFmRatio ?? 2)) % 1;
+      const decay = fastExpNeg(time / (patch.bassFmDecay ?? .11));
+      const depth = (patch.bassFmIndex ?? 1.8) * (.12 + .88 * decay);
+      const octave = TAU * voice.acidPhase * 2;
+      const tone = fastSin(octave + depth * fastSin(TAU * voice.metalPhase));
+      const low = voice.bassFmLow ?? 0;
+      voice.bassFmLow = low + (tone - low) * BASS_FM_LAYER_HIGHPASS;
+      // Filter low sidebands out of the additional layer before mixing it into the bass.
+      output += .36 * patch.bassFmAmount * (.32 + .68 * decay) * (tone - voice.bassFmLow);
+    }
     return output * amp * patch.level * bank.level * voice.velocity;
   }
 
@@ -1253,20 +1297,22 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     const modSustain = patch.modSustain ?? (voice.role === "pad" || voice.role === "strings" ? .42 : .04);
     const modAttack = (patch.modAttack ?? .004) * bank.modAttack;
     const reducedQuality = voice.reducedQuality;
+    const reducedOperators = reducedQuality && !voice.customOperators;
     // The reduced algorithms skip operators 3 and 4. Avoid evaluating their
     // envelopes as well.
     const index1 = patch.algorithm === "carriers" ? 0 : patch.indices[1] * colourIndex * bank.index
-      * modulationEnvelope(time, patch.modDecay[1] * bank.modDecay, modSustain, modAttack);
-    const index2 = reducedQuality || patch.algorithm === "parallel" || patch.algorithm === "carriers"
+      * operatorModulationAt(voice, patch, 1, time, modSustain, modAttack);
+    const index2 = reducedOperators || patch.algorithm === "parallel" || patch.algorithm === "carriers"
       ? 0 : patch.indices[2] * colourIndex * bank.index
-      * modulationEnvelope(time, patch.modDecay[2] * bank.modDecay, modSustain, modAttack);
-    const index3 = reducedQuality ? 0 : patch.indices[3] * colourIndex * bank.index
-      * modulationEnvelope(time, patch.modDecay[3] * bank.modDecay, modSustain, modAttack);
+      * operatorModulationAt(voice, patch, 2, time, modSustain, modAttack);
+    const index3 = reducedOperators ? 0 : patch.indices[3] * colourIndex * bank.index
+      * operatorModulationAt(voice, patch, 3, time, modSustain, modAttack);
     const p = voice.phases;
     const tables = voice.operatorTables;
+    const carrierGain = operatorGainAt(voice, patch, 0, time);
     let sample = 0;
     if (patch.algorithm === "serial") {
-      if (reducedQuality) {
+      if (reducedOperators) {
         sample = oscillatorSample(p[0] + oscillatorSample(p[1], tables?.[1]) * index1, tables?.[0]);
       } else {
         const o4 = oscillatorSample(p[3] + voice.feedbackSample * patch.feedback * bank.feedback, tables?.[3]);
@@ -1277,12 +1323,12 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       }
     } else if (patch.algorithm === "parallel") {
       const a = oscillatorSample(p[0] + oscillatorSample(p[1], tables?.[1]) * index1, tables?.[0]);
-      const b = reducedQuality
+      const b = reducedOperators
         ? oscillatorSample(p[2], tables?.[2])
         : oscillatorSample(p[2] + oscillatorSample(p[3], tables?.[3]) * index3, tables?.[2]);
-      sample = a * .62 + b * .48;
+      sample = a * .62 * carrierGain + b * .48 * operatorGainAt(voice, patch, 2, time);
     } else if (patch.algorithm === "branch") {
-      if (reducedQuality) {
+      if (reducedOperators) {
         sample = oscillatorSample(p[0] + oscillatorSample(p[1], tables?.[1]) * index1, tables?.[0]);
       } else {
         const branch = oscillatorSample(p[2], tables?.[2]) * index2 + oscillatorSample(p[3], tables?.[3]) * index3;
@@ -1290,13 +1336,14 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         sample = oscillatorSample(p[0] + middle * index1, tables?.[0]);
       }
     } else if (patch.algorithm === "carriers") {
-      const textured = reducedQuality
+      const textured = reducedOperators
         ? oscillatorSample(p[2], tables?.[2])
         : oscillatorSample(p[2] + oscillatorSample(p[3], tables?.[3]) * index3, tables?.[2]);
-      sample = oscillatorSample(p[0], tables?.[0]) * .52
-        + (reducedQuality ? 0 : oscillatorSample(p[1], tables?.[1]) * .22) + textured * .38;
+      sample = oscillatorSample(p[0], tables?.[0]) * .52 * carrierGain
+        + (reducedOperators ? 0 : oscillatorSample(p[1], tables?.[1]) * .22 * operatorGainAt(voice, patch, 1, time))
+        + textured * .38 * operatorGainAt(voice, patch, 2, time);
     } else {
-      if (reducedQuality) {
+      if (reducedOperators) {
         sample = oscillatorSample(p[0] + oscillatorSample(p[1], tables?.[1]) * index1, tables?.[0]);
       } else {
         const o4 = oscillatorSample(p[3] + voice.feedbackSample * (patch.feedback * bank.feedback + voice.texture * .8), tables?.[3]);
@@ -1306,6 +1353,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         voice.feedbackSample = o4;
       }
     }
+    if (patch.algorithm !== "parallel" && patch.algorithm !== "carriers") sample *= carrierGain;
     const analog = this.analogSample(voice, patch, bank, pitchScale, vibrato, isPresence, timbreLfo);
     if (!stereoSaw) sample += analog;
     if (patch.noise && !isPresence) sample += this.random(voice) * patch.noise * bank.noise * (.24 + voice.texture * .55);
@@ -1315,7 +1363,7 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
     // A direct carrier anchors every pitched FM voice to the actual MIDI note.
     // This makes melodic intervals and chord voicings remain audible even when
     // the visual data increases modulation depth.
-    const fundamental = fastSin(p[0]);
+    const fundamental = fastSin(p[0]) * carrierGain;
     const unisonAmount = clamp((patch.unison || 0) * bank.unison, 0, .6);
     const unison = isPresence || (reducedQuality && patch.analogMix > .1) || !unisonAmount
       ? 0
@@ -1642,10 +1690,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       voice.panRight = fastSin(angle);
     }
     const presenceSmoothing = 1 / (SAMPLE_RATE * .045);
+    let kickPeak = this.kickPeak;
+    let bassSidechainGain = this.bassSidechainGain;
 
     for (let sampleIndex = 0; sampleIndex < left.length; sampleIndex++) {
       let leftSample = 0;
       let rightSample = 0;
+      let kickLevel = 0;
       const absoluteFrame = this.frame + sampleIndex;
       while (this.pendingNotes.length && this.pendingNotes[0].frame <= absoluteFrame) {
         const pending = this.pendingNotes.shift();
@@ -1703,13 +1754,15 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
           this.voices.splice(index, 1);
           continue;
         }
-        let mix = voice.presetGain * voice.renderMix * (1 - this.kickDuck * voice.duckDepth) * fade;
+        const duckGain = voice.bassSidechain ? bassSidechainGain : 1 - this.kickDuck * voice.duckDepth;
+        let mix = voice.presetGain * voice.renderMix * duckGain * fade;
         if (voice.turnaroundBass) mix *= Math.min(1, time / SCAN_TURN_BASS_FADE_SECONDS);
         const tremolo = voice.sends?.tremolo;
         if (tremolo > 0) {
           const phase = (voice.beatAtStart + time / voice.beatSeconds) * 2;
           mix *= 1 - tremolo * (.5 - .5 * fastCos(TAU * (phase - Math.floor(phase))));
         }
+        if (voice.isKick) kickLevel = Math.max(kickLevel, Math.abs(sample * mix));
         const l = (sample - side) * voice.panLeft * mix;
         const r = (sample + side) * voice.panRight * mix;
         leftSample += l;
@@ -1721,6 +1774,13 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
         }
         if (separateSends && voice.sends) writeSends(outputs, sampleIndex, l, r, voice.sends, voice);
       }
+      // Key a 2:1 compressor from the audible kick, after its filter and fader.
+      // Using the preceding sample's gain keeps the mix independent of voice order.
+      kickPeak = Math.max(kickLevel, kickPeak * KICK_PEAK_DECAY);
+      const targetGain = kickPeak > BASS_SIDECHAIN_THRESHOLD
+        ? Math.max(BASS_SIDECHAIN_MIN_GAIN, Math.sqrt(BASS_SIDECHAIN_THRESHOLD / kickPeak)) : 1;
+      const smoothing = targetGain < bassSidechainGain ? BASS_SIDECHAIN_ATTACK : BASS_SIDECHAIN_RELEASE;
+      bassSidechainGain += (targetGain - bassSidechainGain) * smoothing;
       if (this.presences.size) {
         for (const [id, voice] of this.presences) {
           const smoothing = presenceSmoothing;
@@ -1754,6 +1814,8 @@ class StreetArtFMProcessor extends AudioWorkletProcessor {
       left[sampleIndex] = clamp(leftSample, -1.2, 1.2);
       right[sampleIndex] = clamp(rightSample, -1.2, 1.2);
     }
+    this.kickPeak = kickPeak < 1e-9 ? 0 : kickPeak;
+    this.bassSidechainGain = 1 - bassSidechainGain < 1e-9 ? 1 : bassSidechainGain;
     this.frame += left.length;
     return true;
   }

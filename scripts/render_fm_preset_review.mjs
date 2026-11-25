@@ -9,6 +9,7 @@ import { roundTwoPresets } from "../webapp/static/fm-review-presets-round2.mjs";
 import { roundThreePresets } from "../webapp/static/fm-review-presets-round3.mjs";
 import { retainedFromRoundThree, roundFourPresets } from "../webapp/static/fm-review-presets-round4.mjs";
 import { leadReviewPresets } from "../webapp/static/fm-review-presets-lead.mjs";
+import { operatorReviewPresets } from "../webapp/static/fm-review-presets-operators.mjs";
 import currentGains from "../webapp/static/fm-performance-gains.mjs";
 
 const sampleRate = 48000;
@@ -17,20 +18,22 @@ const roundTwo = process.argv[2] === "--round2";
 const roundThree = process.argv[2] === "--round3";
 const roundFour = process.argv[2] === "--round4";
 const leadReview = process.argv[2] === "--lead-review";
-const levelMatchedReview = roundThree || roundFour || leadReview;
+const operatorReview = process.argv[2] === "--operator-review";
+const levelMatchedReview = roundThree || roundFour || leadReview || operatorReview;
 const calibrate = process.argv[2] === "--calibrate";
 const calibrateLead = process.argv[2] === "--calibrate-lead";
 const auditCalibration = process.argv[2] === "--audit-calibration";
 const sourcePresets = roundTwo ? roundTwoPresets : reviewPresets;
 const output = new URL(
-  `../webapp/runtime/fm-preset-review${leadReview ? "-lead" : roundFour ? "-round4" : roundThree ? "-round3" : roundTwo ? "-round2" : ""}/audio/`, import.meta.url,
+  `../webapp/runtime/fm-preset-review${operatorReview ? "-operators" : leadReview ? "-lead" : roundFour ? "-round4" : roundThree ? "-round3" : roundTwo ? "-round2" : ""}/audio/`, import.meta.url,
 );
 const staticDir = new URL("../webapp/static/", import.meta.url);
 const loadPerformanceBank = () => readPresetBank(JSON.parse(fs.readFileSync(new URL("fm-performance-bank.json", staticDir), "utf8")));
 const groupForPreset = preset => preset.note ?? preset.role;
 const worklet = fs.readFileSync(new URL("../webapp/static/fm-worklet.js", import.meta.url), "utf8").replace(/^import .*;\n/, "");
 const bindings = [
-  "DRUM_DEFAULTS", "DRUM_VOICES", "FACTORY_PATCHES", "PATCHES", "applyFmPatch", "normalizeDrumPatch", "normalizeFmPatch",
+  "DRUM_DEFAULTS", "DRUM_VOICES", "FACTORY_PATCHES", "PATCHES", "OPERATOR_ADSR_DEFAULTS", "OPERATOR_FIXED_HZ",
+  "applyFmPatch", "normalizeDrumPatch", "normalizeFmPatch",
 ];
 const Processor = new Function(...bindings, "sampleRate", "AudioWorkletProcessor", "registerProcessor",
   worklet + "\nreturn StreetArtFMProcessor;")(
@@ -286,16 +289,18 @@ function renderLevelMatchedReview() {
   const keptPath = new URL("../kept-bank.json", output);
   const laterCandidates = new Set((roundFour ? roundFourPresets : [...roundThreePresets, ...roundFourPresets])
     .map(preset => preset.id));
-  const bank = fs.existsSync(keptPath)
+  const bank = !operatorReview && fs.existsSync(keptPath)
     ? readPresetBank(JSON.parse(fs.readFileSync(keptPath, "utf8"))) : loadPerformanceBank();
-  bank.presets = bank.presets.filter(preset => !laterCandidates.has(preset.id));
+  if (!operatorReview) bank.presets = bank.presets.filter(preset => !laterCandidates.has(preset.id));
   const kept = bank.presets;
   if (roundFour && !kept.some(preset => preset.id === retainedFromRoundThree)) {
     kept.push(snapshotBankPreset(roundThreePresets.find(preset => preset.id === retainedFromRoundThree)));
   }
-  const previous = roundFour ? [...reviewPresets, ...roundTwoPresets, ...roundThreePresets] : [...reviewPresets, ...roundTwoPresets];
+  const previous = operatorReview ? kept
+    : roundFour ? [...reviewPresets, ...roundTwoPresets, ...roundThreePresets] : [...reviewPresets, ...roundTwoPresets];
   const previousIds = new Set(previous.map(preset => preset.id));
-  const newPresets = (roundFour ? roundFourPresets : roundThreePresets).map(snapshotBankPreset);
+  const newPresets = (operatorReview ? operatorReviewPresets : roundFour ? roundFourPresets : roundThreePresets)
+    .map(snapshotBankPreset);
   assert.equal(new Set(newPresets.map(preset => preset.id)).size, newPresets.length);
   assert.ok(newPresets.every(preset => !previousIds.has(preset.id)), "Candidates must be new sounds");
   const groups = new Map();
@@ -307,8 +312,12 @@ function renderLevelMatchedReview() {
   const manifest = [];
   for (const group of groups.values()) {
     const comparison = group.map(preset => ({ preset, rendered: render(preset, true) }));
-    const target = Math.min(.08, ...comparison.map(({ rendered: { peak, level } }) => .82 * level / peak));
-    for (const { preset, rendered } of comparison) manifest.push(writePreview(preset, rendered, target));
+    const targets = comparison.map(({ rendered }) => operatorReview
+      ? rendered.level * 10 ** ((-20 - measureLoudness(rendered.samples)) / 20) : .08);
+    const headroom = Math.min(1, ...comparison.map(({ rendered: { peak, level } }, index) => .82 * level / (peak * targets[index])));
+    for (const [index, { preset, rendered }] of comparison.entries()) {
+      manifest.push(writePreview(preset, rendered, targets[index] * headroom));
+    }
     console.log(`${groupForPreset(group[0])} · ${group.length} level-matched previews`);
   }
   fs.writeFileSync(new URL("../manifest.json", output), JSON.stringify(manifest, null, 2) + "\n");

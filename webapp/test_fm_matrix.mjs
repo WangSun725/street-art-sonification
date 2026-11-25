@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import vm from "node:vm";
 import {
-  DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, applyFmPatch,
+  DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, OPERATOR_ADSR_DEFAULTS, OPERATOR_FIXED_HZ, applyFmPatch,
   fmDefaultValue, fmGroups, normalizeDrumPatch, normalizeFmPatch, rebasePreset,
 } from "./static/fm-patches.mjs";
 
@@ -66,6 +66,35 @@ edited.handleMessage({ type: "note", role: "lead_synth", note: 60, duration: .4 
 if (edited.voices.at(-1).patch !== PATCHES.lead_synth) {
   throw new Error("Reset must restore the original instrument patch for new notes");
 }
+
+const independent = new Processor();
+independent.handleMessage({ type: "instrument-patch", role: "lead_synth", values: {
+  "operatorEnvelope.0": "adsr", "operatorAttack.0": .02, "operatorSustain.0": .8,
+  "operatorEnvelope.1": "adsr", "operatorAttack.1": .10, "operatorSustain.1": .6, "operatorRelease.1": .05,
+  "operatorTuning.1": "fixed", "operatorHz.1": 317, "operatorGain.2": 0,
+} });
+for (const note of [60, 72]) independent.handleMessage({
+  type: "note", role: "lead_synth", note, duration: .45, gemsWeights: "artwork",
+});
+const [lower, upper] = independent.voices;
+for (const voice of independent.voices) {
+  const { patch } = voice;
+  if (operatorGainAt(voice, patch, 0, .02) !== 1 || Math.abs(operatorGainAt(voice, patch, 1, .02) - .2) > 1e-8
+    || operatorGainAt(voice, patch, 1, .501) !== 0 || operatorGainAt(voice, patch, 0, .501) <= 0
+    || operatorGainAt(voice, patch, 2, .10) !== 0) {
+    throw new Error("Each operator must have its own ADSR and gain");
+  }
+  independent.operatorPhases(voice, patch, .02);
+  if (Math.abs(voice.phases[1] - TAU * 317 / sampleRate) > 1e-8
+    || !(voice.endTime > voice.duration) || envelope(voice.endTime + 1e-6, voice.duration, voice.ampSettings) !== 0) {
+    throw new Error("Fixed tuning must be independent of key and vibrato, and the total envelope must still end the note");
+  }
+}
+if (!(upper.phases[0] > lower.phases[0])) throw new Error("Ratio operators must still track the note");
+upper.reducedQuality = true;
+const fourthPhase = upper.phases[3];
+independent.operatorPhases(upper, upper.patch, 0);
+if (upper.phases[3] === fourthPhase) throw new Error("Edited operators must remain active when the mix is busy");
 
 const kit = new Processor();
 kit.handleMessage({ type: "drum-patch", note: 42, values: { decay: 14, "cutoff.1": 2200 } });
@@ -512,11 +541,60 @@ for (const [slot, role] of stemRoles.entries()) {
   if (peak === 0) throw new Error(role + " has no stem output");
 }
 
+function renderBassSidechain(drumNote, drumMix = .72) {
+  const processor = new Processor({ processorOptions: { stemRoles: ["bass", "guitar"] } });
+  const buses = Array.from({ length: 6 }, () => [new Float32Array(128), new Float32Array(128)]);
+  const bass = new Float32Array(128 * 128);
+  const guitar = new Float32Array(bass.length);
+  processor.handleMessage({ type: "stems", enabled: true });
+  processor.handleMessage({ type: "mix", regions: [
+    { id: "bass", mix: 1 }, { id: "guitar", mix: 1 }, { id: "kit", mix: drumMix },
+  ] });
+  for (const role of ["bass", "guitar"]) {
+    processor.handleMessage({ type: "note", role, note: role === "bass" ? 36 : 60,
+      duration: .4, regionId: role, gemsWeights: "artwork" });
+  }
+  if (drumNote) {
+    processor.handleMessage({ type: "note", role: "drums", note: drumNote, time: .10,
+      duration: .12, velocity: .88, regionId: "kit", gemsWeights: "artwork" });
+  }
+  for (let frame = 0; frame < bass.length; frame += 128) {
+    for (const bus of buses) for (const channel of bus) channel.fill(0);
+    processor.process([], buses);
+    bass.set(buses[4][0], frame);
+    guitar.set(buses[5][0], frame);
+  }
+  return { bass, guitar };
+}
+
+const drySidechain = renderBassSidechain();
+const keyedSidechain = renderBassSidechain(36);
+const hatSidechain = renderBassSidechain(42);
+const mutedSidechain = renderBassSidechain(36, 0);
+let strongestDuck = 1;
+for (const [frame, sample] of drySidechain.bass.entries()) {
+  if (sample !== hatSidechain.bass[frame] || sample !== mutedSidechain.bass[frame]
+    || drySidechain.guitar[frame] !== keyedSidechain.guitar[frame]) {
+    throw new Error("Bass sidechain must respond only to an audible kick and affect only Bass");
+  }
+  if (Math.abs(sample) < .0001) continue;
+  const gain = keyedSidechain.bass[frame] / sample;
+  strongestDuck = Math.min(strongestDuck, gain);
+  if (gain < 10 ** (-2.5 / 20) - .001 || gain > 1.001) {
+    throw new Error("Bass sidechain must stay within its gain reduction limit");
+  }
+  if (frame < .10 * sampleRate && gain !== 1 || frame > .26 * sampleRate && gain < .97) {
+    throw new Error("Bass sidechain must start on the kick and release quickly");
+  }
+}
+if (strongestDuck > .85) throw new Error("An audible kick should briefly lower Bass");
+
 console.log("FM matrix: 81 cells, " + BANK_PARAMETERS.length + " parameters, DSP OK");
 `;
 
 const context = {
-  DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, applyFmPatch, normalizeDrumPatch, normalizeFmPatch,
+  DRUM_DEFAULTS, DRUM_VOICES, FACTORY_PATCHES, PATCHES, OPERATOR_ADSR_DEFAULTS, OPERATOR_FIXED_HZ,
+  applyFmPatch, normalizeDrumPatch, normalizeFmPatch,
   fmDefaultValue, fmGroups, rebasePreset,
   sampleRate: 48000,
   AudioWorkletProcessor: class {

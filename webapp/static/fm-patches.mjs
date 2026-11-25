@@ -132,6 +132,8 @@ const operators = [
   field("modSustain", "Modulation sustain", 0, 1, .01),
   field("feedback", "Feedback", 0, 1.2, .01),
 ];
+export const OPERATOR_ADSR_DEFAULTS = [.008, .18, .60, .12];
+export const OPERATOR_FIXED_HZ = 440;
 const filter = [
   field("cutoff.0", "Dark cutoff", 60, 12000, 1, "Hz"),
   field("cutoff.1", "Bright cutoff", 60, 16000, 1, "Hz"),
@@ -169,6 +171,23 @@ const shaping = [
 ];
 
 const optional = control => ({ ...control, optional: true });
+const operatorGroups = Array.from({ length: 4 }, (_, index) => {
+  const envelopeKey = `operatorEnvelope.${index}`;
+  const tuningKey = `operatorTuning.${index}`;
+  return { label: `Operator ${index + 1}`, collapsible: true, fields: [
+    optional({ key: envelopeKey, label: `Operator ${index + 1} envelope`,
+      options: { classic: "Classic", adsr: "Independent ADSR" }, fallback: "classic" }),
+    ...envelopeFields.map((control, step) => optional({
+      ...control, key: `operator${control.label}.${index}`, label: `Operator ${index + 1} ${control.label}`,
+      fallback: OPERATOR_ADSR_DEFAULTS[step], enabledBy: [envelopeKey, "adsr"],
+    })),
+    optional(field(`operatorGain.${index}`, `Operator ${index + 1} level`, 0, 1.5, .01, "×", 1)),
+    optional({ key: tuningKey, label: `Operator ${index + 1} tuning`,
+      options: { ratio: "Note ratio", fixed: "Fixed Hz" }, fallback: "ratio" }),
+    optional({ ...field(`operatorHz.${index}`, `Operator ${index + 1} frequency`, 20, 8000, 1, "Hz", OPERATOR_FIXED_HZ),
+      enabledBy: [tuningKey, "fixed"] }),
+  ] };
+});
 const pulseWidthMotion = optional(field("pulseWidthMotion", "Pulse width movement", 0, .28, .01, "", 0));
 const gate = [
   optional(field("gateDepth", "Pulse gate depth", 0, 1, .01, "", 0)),
@@ -226,6 +245,11 @@ export function fmGroups(role, { expanded = false } = {}) {
         ...oscillatorBlend.slice(0, 2),
         field("cleanSub", "Clean sub", 0, 1.25, .01),
         field("octaveBody", "Octave body", 0, 1, .01),
+      ] }, { label: "FM tone layer", fields: [
+        optional(field("bassFmAmount", "FM layer amount", 0, 1, .01, "", 0)),
+        optional(field("bassFmRatio", "FM modulator ratio", .25, 16, .001, "×", 2)),
+        optional(field("bassFmIndex", "FM modulation depth", 0, 8, .01, "", 1.8)),
+        optional(field("bassFmDecay", "FM modulation decay", .008, 1, .001, "s", .11)),
       ] });
     } else if (role !== "percussion_texture") {
       groups.unshift({ label: "Operator routing and waveforms", fields: [
@@ -235,6 +259,7 @@ export function fmGroups(role, { expanded = false } = {}) {
         ...Array.from({ length: 4 }, (_, index) => waveform(`waveforms.${index}`, `Operator ${index + 1} waveform`)),
       ] });
       groups.push(
+        ...operatorGroups,
         { label: "Oscillator blend", fields: patch.sawWidth
           ? [...oscillatorBlend, pulseWidthMotion, field("sawBlend", "Stereo saw blend", 0, 1, .01, "", 0)]
           : [...oscillatorBlend, pulseWidthMotion] },

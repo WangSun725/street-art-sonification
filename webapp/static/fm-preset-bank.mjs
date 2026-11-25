@@ -1,6 +1,6 @@
 import {
   DRUM_VOICES, PATCHES, drumDefaultValue, fmDefaultValue, fmGroups, normalizeDrumPatch, normalizeFmPatch,
-} from "./fm-patches.mjs?v=electronic-patches1";
+} from "./fm-patches.mjs?v=operator-adsr1";
 
 export const PRESET_BANK_STORAGE = "street-art-fm-preset-bank-v1";
 export const PRESET_BANK_FORMAT = "street-art-fm-preset-bank";

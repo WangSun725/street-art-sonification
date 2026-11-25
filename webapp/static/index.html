@@ -503,15 +503,15 @@
   <script src="/static/vendor/webgazer/webgazer.js?v=3.5.3-local1" defer></script>
   <script type="module">
     import * as composition from "/static/artwork-composition.mjs?v=reviewed-materials1";
-    import * as fm from "/static/fm-patches.mjs?v=electronic-patches1";
-    import * as fmBank from "/static/fm-preset-bank.mjs?v=electronic-patches1";
-    import fmGains from "/static/fm-performance-gains.mjs?v=reviewed-materials1";
+    import * as fm from "/static/fm-patches.mjs?v=operator-adsr1";
+    import * as fmBank from "/static/fm-preset-bank.mjs?v=operator-adsr1";
+    import fmGains from "/static/fm-performance-gains.mjs?v=full-review1";
     import * as scan from "/static/scan-path.mjs?v=scan-accompaniment1";
     import * as presets from "/static/performance-preset.mjs?v=region-instruments1";
     import * as multitrack from "/static/multitrack-output.mjs?v=multitrack1";
     window.StreetArtComposition = composition;
     window.StreetArtStudio = { fm, fmBank, fmGains, scan, presets, multitrack };
-    await import("/static/app.js?v=live-harmony1");
+    await import("/static/app.js?v=operator-adsr1");
     fetch("/runtime/mix-review/manifest.json", { method: "HEAD", cache: "no-store" })
       .then(response => { document.getElementById("mixReviewLink").hidden = !response.ok; })
       .catch(() => {});

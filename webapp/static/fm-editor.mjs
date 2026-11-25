@@ -1,9 +1,9 @@
 import {
   DRUM_VOICES, PROJECT_PRESET_NAMES, drumDefaultValue, fmDefaultValue, fmGroups, normalizeDrumPatch,
   normalizeFmPatch, rebasePreset,
-} from "./fm-patches.mjs?v=electronic-patches1";
+} from "./fm-patches.mjs?v=operator-adsr1";
 import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=short-kick1";
-import { PRESET_BANK_STORAGE, bankPatchValues, readPresetBank } from "./fm-preset-bank.mjs?v=electronic-patches1";
+import { PRESET_BANK_STORAGE, bankPatchValues, readPresetBank } from "./fm-preset-bank.mjs?v=operator-adsr1";
 
 const instruments = {
   lead_synth: "Lead Synth",
@@ -151,8 +151,11 @@ function refreshFields() {
   const [group, id] = selection();
   const values = activePreset?.values ?? (compareDefault ? {} : group[id] || {});
   for (const view of fieldViews) {
-    const value = values[view.control.key];
-    view.show(value ?? baseline(view.control), value !== undefined, Boolean(activePreset));
+    const { control } = view;
+    const value = values[control.key];
+    const [dependency, required] = control.enabledBy ?? [];
+    const inactive = dependency && values[dependency] !== required;
+    view.show(value ?? baseline(control), value !== undefined, Boolean(activePreset || inactive));
   }
   updateButtons();
 }
@@ -216,7 +219,7 @@ function makeKnob(control) {
   range.addEventListener("input", () => setValue(control, range.valueAsNumber));
   number.addEventListener("change", () => {
     if (Number.isFinite(number.valueAsNumber)) setValue(control, number.valueAsNumber);
-    else show(currentValue, knob.hasAttribute("data-edited"));
+      else show(currentValue, knob.hasAttribute("data-edited"), range.disabled);
   });
   number.addEventListener("keydown", event => {
     if (event.key === "Enter") number.blur();
@@ -238,7 +241,9 @@ function makeKnob(control) {
     setValue(control, Number(rounded.toFixed(4)));
   });
   dial.addEventListener("lostpointercapture", () => { drag = null; });
-  dial.addEventListener("dblclick", () => setValue(control, baseline(control)));
+  dial.addEventListener("dblclick", () => {
+    if (!range.disabled) setValue(control, baseline(control));
+  });
   fieldViews.push({ control, show });
   return knob;
 }
@@ -289,9 +294,9 @@ function renderSelection() {
   fieldViews.length = 0;
   const groups = isDrum ? DRUM_VOICES[drumNote].groups : fmGroups(role, { expanded: true });
   ui.knobs.replaceChildren(...groups.map(group => {
-    const section = document.createElement("section");
+    const section = document.createElement(group.collapsible ? "details" : "section");
     section.className = "panel";
-    const heading = document.createElement("h3");
+    const heading = document.createElement(group.collapsible ? "summary" : "h3");
     heading.textContent = group.label;
     const grid = document.createElement("div");
     grid.className = "knob-grid";
@@ -366,7 +371,7 @@ async function getAudio() {
     const resumed = context.resume();
     audioPromise = (async () => {
       try {
-        await Promise.all([resumed, context.audioWorklet.addModule("./fm-worklet.js?v=lead-tuning1")]);
+        await Promise.all([resumed, context.audioWorklet.addModule("./fm-worklet.js?v=operator-adsr1")]);
         const voice = new AudioWorkletNode(context, "street-art-fm", {
           numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
         });
