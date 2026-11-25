@@ -350,18 +350,11 @@ function artworkPan(role, note) {
   return (role === "drums" ? FM_DRUM_PAN[note] : undefined) ?? FM_INSTRUMENT_PAN[role] ?? 0;
 }
 
-let defaultFmBank;
-
 async function loadDefaultFmTakes() {
-  defaultFmBank ??= fetch("/static/fm-performance-bank.json?v=reviewed-materials1").then(async response => {
-    if (!response.ok) throw new Error(`FM preset bank returned ${response.status}`);
-    return STUDIO.fmBank.readPresetBank(await response.json());
-  });
   try {
-    const bank = await defaultFmBank;
+    const bank = await STUDIO.fmBank.loadReviewedFmBank();
     return bank.presets.length ? STUDIO.fmBank.drawFmTakes(bank) : null;
   } catch (error) {
-    defaultFmBank = null;
     console.warn("Using default FM sounds", error);
     return null;
   }

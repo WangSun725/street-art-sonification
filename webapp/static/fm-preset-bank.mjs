@@ -4,6 +4,21 @@ import {
 
 export const PRESET_BANK_STORAGE = "street-art-fm-preset-bank-v1";
 export const PRESET_BANK_FORMAT = "street-art-fm-preset-bank";
+export const REVIEWED_FM_BANK = "fm-performance-bank-reviewed.json";
+
+let reviewedBankRequest;
+
+export function loadReviewedFmBank() {
+  const url = new URL(REVIEWED_FM_BANK, import.meta.url);
+  reviewedBankRequest ??= fetch(url, { cache: "no-cache" }).then(async response => {
+    if (!response.ok) throw new Error(`FM preset bank returned ${response.status}`);
+    return readPresetBank(await response.json());
+  }).catch(error => {
+    reviewedBankRequest = null;
+    throw error;
+  });
+  return reviewedBankRequest;
+}
 
 function controlsFor(role, note) {
   if (typeof role !== "string") return [];

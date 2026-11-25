@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as fm from "../webapp/static/fm-patches.mjs";
-import { bankPatchValues, fmTakePatches, readPresetBank, snapshotBankPreset } from "../webapp/static/fm-preset-bank.mjs";
+import { REVIEWED_FM_BANK, bankPatchValues, fmTakePatches, readPresetBank, snapshotBankPreset } from "../webapp/static/fm-preset-bank.mjs";
 import { reviewPresets } from "../webapp/static/fm-review-presets.mjs";
 import { roundTwoPresets } from "../webapp/static/fm-review-presets-round2.mjs";
 import { roundThreePresets } from "../webapp/static/fm-review-presets-round3.mjs";
@@ -28,7 +28,8 @@ const output = new URL(
   `../webapp/runtime/fm-preset-review${operatorReview ? "-operators" : leadReview ? "-lead" : roundFour ? "-round4" : roundThree ? "-round3" : roundTwo ? "-round2" : ""}/audio/`, import.meta.url,
 );
 const staticDir = new URL("../webapp/static/", import.meta.url);
-const loadPerformanceBank = () => readPresetBank(JSON.parse(fs.readFileSync(new URL("fm-performance-bank.json", staticDir), "utf8")));
+const loadPerformanceBank = (filename = "fm-performance-bank.json") =>
+  readPresetBank(JSON.parse(fs.readFileSync(new URL(filename, staticDir), "utf8")));
 const groupForPreset = preset => preset.note ?? preset.role;
 const worklet = fs.readFileSync(new URL("../webapp/static/fm-worklet.js", import.meta.url), "utf8").replace(/^import .*;\n/, "");
 const bindings = [
@@ -242,7 +243,7 @@ function renderCalibration(preset, gain = 1) {
 }
 
 function calibratePlayback({ auditOnly = false, leadOnly = false } = {}) {
-  const { presets } = loadPerformanceBank();
+  const { presets } = loadPerformanceBank(REVIEWED_FM_BANK);
   const groups = new Map();
   for (const preset of presets) {
     if (leadOnly && preset.role !== "lead_synth") continue;

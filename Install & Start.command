@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -eu
+setopt PIPE_FAIL
 
 PROJECT_DIR="${0:A:h}"
 cd "$PROJECT_DIR"
@@ -8,8 +9,10 @@ pause_on_error() {
   local exit_code=$?
   echo
   echo "Installation stopped before completion."
-  echo "Please read the error above, then press Return to close this window."
-  read -r
+  if [[ -t 0 ]]; then
+    echo "Please read the error above, then press Return to close this window."
+    read -r || true
+  fi
   exit "$exit_code"
 }
 trap pause_on_error ZERR
@@ -25,7 +28,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ "$(uname -m)" != "arm64" ]]; then
-  echo "This release requires an Apple Silicon Mac (M1, M2, M3, or M4)."
+  echo "This release requires an Apple Silicon Mac."
+  false
+fi
+
+MACOS_VERSION="$(sw_vers -productVersion)"
+if (( ${MACOS_VERSION%%.*} < 26 )); then
+  echo "The bundled vision-model software requires macOS 26 or later."
   false
 fi
 
@@ -52,7 +61,7 @@ fi
 
 if [[ ! -x "$PROJECT_DIR/.interaction-env/bin/python" ]]; then
   echo "[2/7] Creating the vision-model environment…"
-  "$UV_BIN" venv --python 3.12 "$PROJECT_DIR/.interaction-env"
+  "$UV_BIN" venv --managed-python --python 3.12 "$PROJECT_DIR/.interaction-env"
 else
   echo "[2/7] Vision-model environment already exists."
 fi
@@ -60,7 +69,7 @@ fi
 
 if [[ ! -x "$PROJECT_DIR/.venv/bin/python" ]]; then
   echo "[3/7] Creating the segmentation environment…"
-  "$UV_BIN" venv --python 3.11 "$PROJECT_DIR/.venv"
+  "$UV_BIN" venv --managed-python --python 3.11 "$PROJECT_DIR/.venv"
 else
   echo "[3/7] Segmentation environment already exists."
 fi
@@ -75,7 +84,7 @@ mkdir -p "$SAM_DOWNLOADS"
 
 if [[ ! -f "$SAM_DIR/sam2/__init__.py" ]]; then
   echo "[4/7] Downloading the SAM 2.1 source…"
-  curl -L --fail --continue-at - \
+  curl -L --fail --retry 3 --remove-on-error \
     -o "$SAM_ARCHIVE" \
     "https://github.com/facebookresearch/sam2/archive/$SAM_COMMIT.tar.gz"
   tar -xzf "$SAM_ARCHIVE" -C "$PROJECT_DIR/third_party"
@@ -94,7 +103,7 @@ SAM_CHECKPOINT="$SAM_DIR/checkpoints/sam2.1_hiera_tiny.pt"
 mkdir -p "$SAM_DIR/checkpoints"
 if [[ ! -s "$SAM_CHECKPOINT" ]]; then
   echo "[5/7] Downloading SAM 2.1 Hiera Tiny (approximately 149 MB)…"
-  curl -L --fail --continue-at - \
+  curl -L --fail --retry 3 --remove-on-error \
     -o "$SAM_CHECKPOINT.part" \
     "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt"
   mv "$SAM_CHECKPOINT.part" "$SAM_CHECKPOINT"

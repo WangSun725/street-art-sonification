@@ -3,7 +3,7 @@ import {
   normalizeFmPatch, rebasePreset,
 } from "./fm-patches.mjs?v=operator-adsr1";
 import { drumPresets, instrumentPresets } from "./fm-editor-presets.mjs?v=short-kick1";
-import { PRESET_BANK_STORAGE, bankPatchValues, readPresetBank } from "./fm-preset-bank.mjs?v=operator-adsr1";
+import { PRESET_BANK_STORAGE, bankPatchValues, loadReviewedFmBank, readPresetBank } from "./fm-preset-bank.mjs?v=bundled-bank1";
 
 const instruments = {
   lead_synth: "Lead Synth",
@@ -49,6 +49,10 @@ let audioError = "";
 let storedLocally = true;
 const overrides = readDraft();
 let presetBank = localPresetBank();
+const reviewedBank = await loadReviewedFmBank().catch(error => {
+  console.warn("Could not load the included FM preset bank", error);
+  return null;
+});
 
 function localPresetBank() {
   try {
@@ -58,7 +62,8 @@ function localPresetBank() {
 }
 
 function updateBankStatus() {
-  ui["bank-status"].textContent = presetBank ? `${presetBank.presets.length} saved presets loaded` : "";
+  const included = reviewedBank ? `${reviewedBank.presets.length} project presets included` : "Project presets unavailable";
+  ui["bank-status"].textContent = presetBank ? `${included} · ${presetBank.presets.length} imported presets` : included;
 }
 
 function readDraft() {
@@ -275,8 +280,15 @@ function makeChoice(control) {
 
 function presetsForSelection() {
   const builtIn = (role === "drums" ? drumPresets[drumNote] : instrumentPresets[role]) ?? [];
-  const saved = (presetBank?.presets ?? []).filter(preset => preset.role === role && (role !== "drums" || preset.note === drumNote));
-  return [...builtIn, ...saved.map(preset => ({ ...preset, fromBank: true }))];
+  const available = new Map();
+  for (const bank of [reviewedBank, presetBank]) {
+    for (const preset of bank?.presets ?? []) {
+      if (preset.role === role && (role !== "drums" || preset.note === drumNote)) {
+        available.set(preset.id, { ...preset, fromBank: true });
+      }
+    }
+  }
+  return [...builtIn, ...available.values()];
 }
 
 function renderSelection() {
@@ -574,3 +586,6 @@ ui["bank-file"].addEventListener("change", async () => {
 });
 renderSelection();
 updateBankStatus();
+fetch("/runtime/fm-preset-review-operators/manifest.json", { method: "HEAD", cache: "no-store" })
+  .then(response => { byId("preset-review").hidden = !response.ok; })
+  .catch(() => {});

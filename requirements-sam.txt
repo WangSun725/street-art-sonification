@@ -1,4 +1,6 @@
 # Core segmentation environment for macOS Apple Silicon / Python 3.11
+# The installer builds SAM 2.1 from the pinned official source after these dependencies are installed.
+setuptools==83.0.0
 numpy==1.26.4
 torch==2.14.0
 torchvision==0.29.0

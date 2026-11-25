@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FM Patch Editor · Street Art Sonification</title>
   <link rel="stylesheet" href="./fm-editor.css?v=operator-adsr1">
-  <script type="module" src="./fm-editor.mjs?v=operator-adsr1"></script>
+  <script type="module" src="./fm-editor.mjs?v=bundled-bank1"></script>
 </head>
 <body>
   <header class="topbar">
     <a href="/" class="back">← Street Art Sonification</a>
     <div class="bank-actions">
-      <a href="./fm-preset-review.html?round=operators">Preset review</a>
+      <a id="preset-review" href="./fm-preset-review.html?round=operators" hidden>Preset review</a>
       <button id="import-bank" type="button">Import preset bank</button>
       <button id="export" type="button" disabled>Export changes</button>
     </div>

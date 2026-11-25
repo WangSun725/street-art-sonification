@@ -3,8 +3,7 @@
 Street Art Sonification is a local, interactive artwork explorer. It divides a street-art image into meaningful regions, then responds with sound, contour feedback, and a live interaction signal through pointer, webcam gaze, or timed scanning.
 
 > [!IMPORTANT]
-> **macOS only. Apple Silicon is required.**
-> This version supports M1, M2, M3, and M4 Macs. Windows, Linux, and Intel Macs are not currently supported.
+> **Requires an Apple Silicon Mac running macOS 26 or later.**
 
 ## What you can do
 
@@ -27,8 +26,8 @@ Once the regions are ready, pointer movement, gaze estimation, the timed scan, a
 
 You need:
 
-- A Mac with an Apple Silicon processor: M1, M2, M3, or M4.
-- macOS 13 or later.
+- A Mac with an Apple Silicon processor.
+- macOS 26 or later for the included vision-model runtime.
 - At least 16 GB of memory recommended.
 - At least 10 GB of free disk space.
 - An internet connection for the first installation.
@@ -48,6 +47,8 @@ The first installation downloads approximately 2.7 GB of model weights, plus the
 7. Wait for the browser to open automatically.
 
 The first installation can take several minutes. The Terminal shows download and setup progress for Python, Qwen3-VL, SAM 2.1, and SAM 3. The app can use SAM 2.1 if the optional SAM 3 download is unavailable.
+
+The project ZIP includes the 84 reviewed FM presets and their loudness calibration. New artwork sessions automatically use this bank for A/B playback. Open **FM Patch Editor** to audition the included sounds for each instrument and drum piece.
 
 You do not need Homebrew, Anaconda, or prior programming experience.
 
@@ -225,19 +226,19 @@ Kick and Acid Bass bypass the Delay and Reverb sends. The other pieces of the dr
 
 The drum phrase replaces late hits in the fourth bar with two to four tom strokes. Low, Mid and High Tom are synthesized drum voices on MIDI notes 43, 47 and 50 and can be auditioned and adjusted in the FM Patch Editor.
 
-**FM Patch Editor → Preset review** opens the Operator ADSR review, with two new sounds for each instrument and drum piece. Run `node scripts/render_fm_preset_review.mjs --operator-review` with `ffmpeg` available to generate the level-matched previews. **Save updated bank** saves the keep choices in the browser and downloads a JSON bank. Use **Import preset bank** to load it in another browser.
+The [included FM bank](webapp/static/fm-performance-bank-reviewed.json) contains 84 reviewed patches with their complete settings. The player loads it for new artwork sessions and the FM Patch Editor lists its sounds under **Presets**. **Import preset bank** adds an optional custom collection for use in the editor. If a custom preset has the same ID as an included preset, the editor shows the custom version.
 
-The [final reviewed FM bank](webapp/static/fm-performance-bank-reviewed.json) contains the 84 selected patches used for the four desktop mural rerenders. Load this JSON with **Import preset bank** in the FM Patch Editor. The bank includes each selected preset's complete patch settings.
+The Operator ADSR review contains two new sounds for each instrument and drum piece. Run `node scripts/render_fm_preset_review.mjs --operator-review` with `ffmpeg` available to generate the level-matched review recordings and enable **FM Patch Editor → Preset review**. **Save updated bank** saves the keep choices in the browser and downloads a JSON bank.
 
 To review every sound again, place the exported bank at `webapp/runtime/fm-preset-review-operators/submitted-bank.json` and open the local [full-bank review](http://127.0.0.1:8765/static/fm-preset-review.html?round=operators-all). **Export selections** downloads the kept sounds and all review decisions. The [original five-sound review](http://127.0.0.1:8765/static/fm-preset-review.html) remains available after generating its previews with `node scripts/render_fm_preset_review.mjs`.
 
 The local [second preset review](http://127.0.0.1:8765/static/fm-preset-review.html?round=2) places the saved sounds above the new candidates in each group. **Save updated bank** exports the saved sounds and any new sounds marked **Keep**. To regenerate the new previews, pass `--round2` to the same render script. The second review reads the original selection from `webapp/runtime/fm-preset-review-round2/kept-bank.json`.
 
-The local [third preset review](http://127.0.0.1:8765/static/fm-preset-review.html?round=3) adds 34 FM patches for groups with fewer than five sounds. Each group plays its current sounds and the new candidates with the same performance and matched levels. Run `node scripts/render_fm_preset_review.mjs --round3` to render the comparisons. Export adds the new picks to the 60 retained sounds. The artwork player loads its active bank from `webapp/static/fm-performance-bank.json`.
+The local [third preset review](http://127.0.0.1:8765/static/fm-preset-review.html?round=3) adds 34 FM patches for groups with fewer than five sounds. Each group plays its current sounds and the new candidates with the same performance and matched levels. Run `node scripts/render_fm_preset_review.mjs --round3` to render the comparisons. Export adds the new picks to the 60 retained sounds.
 
 The local [fourth preset review](http://127.0.0.1:8765/static/fm-preset-review.html?round=4) carries over Paper Flick and offers 34 more electronic alternatives, including pulse gating, ring modulation and digital hold. Run `node scripts/render_fm_preset_review.mjs --round4` to generate the previews and the retained bank for this review. **Save updated bank** exports the retained sounds and new selections for the FM Patch Editor.
 
-The artwork player uses the approved fourth-round bank of 73 FM patches, including Paper Flick. Each new analysis draws two different sounds per instrument and per drum piece. Rightward movement uses A and leftward movement uses B, with phrase and patch changes aligned to the same bar line. Both sets are selected once, so returning to A recalls the same sounds. During linked scanning, the scan path sets the default, with the gaze override described above. The patch controls show the A values, and manual edits apply to new notes in both sets. **Save Preset** includes both sets and any edits, and older artwork presets still open with their original settings.
+Each new analysis draws two different sounds per instrument and per drum piece from the included bank. Rightward movement uses A and leftward movement uses B, with phrase and patch changes aligned to the same bar line. Both sets are selected once, so returning to A recalls the same sounds. During linked scanning, the scan path sets the default, with the gaze override described above. The patch controls show the A values, and manual edits apply to new notes in both sets. **Save Preset** includes both sets and any edits. Reopening a saved artwork restores its original settings and embedded sounds.
 
 Lead Synth keeps a single envelope across connected notes. Steps up to two semitones glide for 6 ms, and larger leaps go directly to the target pitch. A note after a rest or direction change starts at its own pitch, and repeated pitches get a new attack. The Lead carrier follows the MIDI pitch through the attack with up to four cents of vibrato.
 
@@ -293,7 +294,7 @@ The local server stops when its Terminal window is closed or the Mac restarts. D
 
 ### macOS will not open a `.command` file
 
-Right-click the file, choose **Open**, then confirm **Open** in the macOS dialog. Use the launcher in the project ZIP downloaded from this repository.
+Use the launcher in the project ZIP downloaded from this repository. If macOS blocks it after your first attempt, follow [Apple's instructions for approving downloaded software](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**.
 
 ### There is no sound
 
